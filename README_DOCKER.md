@@ -46,4 +46,5 @@ docker context use default
 ## Features
 *   **Auto-Healing Sync:** If `repo sync` crashes, the container automatically cleans lock files and retries (up to 100 times).
 *   **Permissions:** The container automatically detects that you own the `docker_source` folder and creates an internal user to match. No `chown` needed.
-*   **Muppets:** Automatically configures vendor manifests so you don't need a phone connected.
+*   **Muppets:** Automatically configures vendor manifests to fetch blobs from TheMuppets (if key matches).
+    *   *Note:* If TheMuppets is missing files for 22.1, you may need to copy `vendor/google` from your baremetal build into `docker_source/lineage/vendor/google`.

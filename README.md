@@ -8,55 +8,45 @@ Ensures your Ubuntu host has all required packages, including specific fixes for
 ```
 
 ## 2. Automated Build (Pixel 8 Pro)
-We have a unified script that handles `repo init`, `sync`, vendor blobs (via TheMuppets), and the final build.
+We have a unified script `build-lineage2.sh` that handles source initialization, sync, blob rescue (from images), and the final build.
+
+**Key Features:**
+*   **Robust Sync:** Automatically detects "unsupported checkout state" errors, deletes the corrupted folder, and retries.
+*   **Verbose Logging:** Shows real-time progress of file checks and downloads.
+*   **Blob Rescue:** Scans local factory images (in `images/extracted`) to find missing vendor files.
+
+### Usage
+The script defaults to **LineageOS 22.1** if no version is specified.
 
 ```bash
-# Run in background (recommended due to long run time)
-nohup ./build-husky-baremetal.sh > logs/husky_build.log 2>&1 &
+# Standard Build (Defaults to 22.1)
+./build-lineage2.sh
 
-# Monitor progress
-tail -f logs/husky_build.log
+# Build a Specific Version
+./build-lineage2.sh 22.2
+
+# Build with Clean (Wipes out/ directory)
+./build-lineage2.sh --clean
+
+# Build without Syncing (Faster if source is already updated)
+./build-lineage2.sh --skip-sync
+
+# Combine Arguments (Order doesn't matter)
+./build-lineage2.sh 22.2 --clean --skip-sync
 ```
 
-**Configuration:**
-*   **Device:** Google Pixel 8 Pro (`husky`)
-*   **Target:** LineageOS 22.1 (Android 15 Stable)
-*   **Source Tree:** `android_source/LINEAGE_22_1`
-*   **Logs:** `logs/husky_22_1.log`
-*   **Output:** `zips/`
+### Setup & blobs
+The script expects factory images to be extracted in `images/extracted`. It attempts to "rescue" missing blobs by finding them in that directory if they are missing from the vendor tree.
 
-## 3. Hard Reset (If Build Fails/Corrupts)
-If `repo sync` gets stuck or corrupted (common on external drives), use this Nuclear Option to start fresh.
-
-**WARNING: Deletes 100GB of source code!**
+## 3. Troubleshooting / Hard Reset
+If `repo sync` gets stuck or you need to wipe everything:
 
 ```bash
-# 1. Kill EVERY background process
+# 1. Kill background processes
 pkill -f repo
 pkill -f python
-pkill -f build-husky
+pkill -f build-lineage
 
-# 2. Verify cleaning path (Safety Check)
-cd /media/BIG_STORAGE/lineageOS/android_source
-
-# 3. Wipe the specific version folder
-rm -rf LINEAGE_23_0
-
-# 4. Restart the build script
-cd ..
-nohup ./build-husky-baremetal.sh > logs/husky_build.log 2>&1 &
+# 2. Wipe the source tree (WARNING: Deletes downloaded source)
+rm -rf android_source/LINEAGE_22_1   # or appropriate version folder
 ```
-
-### Monitoring the Build
-The script runs in the background. Check logs with:
-```bash
-tail -f logs/husky_22_1.log
-```
-(Note: Log filename varies, check `logs/` directory).
-
-### Stopping the Build
-To forcefully stop the background build process:
-```bash
-pkill -f build-husky-baremetal.sh
-```
-*Note: The script now includes a check to prevent multiple instances from running simultaneously.*

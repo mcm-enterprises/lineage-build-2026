@@ -7,10 +7,13 @@ services:
     container_name: lineage-builder-husky
     restart: "no"
 
+    # Privileged mode is REQUIRED for mounting loopback images inside the container
+    privileged: true
+
     # Environment Configuration
     environment:
       - DEVICE=husky
-      - BRANCH=lineage-23.0
+      - BRANCH=lineage-22.1
       - USE_CCACHE=1
       - CCACHE_SIZE=50G
 
@@ -18,6 +21,9 @@ services:
     volumes:
       # Source Code (The 150GB monster)
       - ../docker_source/lineage:/android/lineage
+
+      # Factory Images (For extraction)
+      - ../images:/android/images
 
       # Output Zips
       - ../docker_source/zips:/android/zips

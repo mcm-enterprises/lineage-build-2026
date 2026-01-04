@@ -51,17 +51,9 @@ git config --global user.email "dockerbuild@example.com"
 git config --global user.name "Docker Builder"
 git config --global --add safe.directory '*'
 
-# 2. LOCAL MANIFESTS (TheMuppets)
-mkdir -p .repo/local_manifests
-cat > .repo/local_manifests/muppets.xml <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<manifest>
-  <remote name="muppets" fetch="https://github.com/TheMuppets" />
-  <project name="proprietary_vendor_google_husky" path="vendor/google/husky" remote="muppets" revision="$BRANCH" />
-  <project name="proprietary_vendor_google_shiba" path="vendor/google/shiba" remote="muppets" revision="$BRANCH" />
-  <project name="proprietary_vendor_google_zuma" path="vendor/google/zuma" remote="muppets" revision="$BRANCH" />
-</manifest>
-XML
+# 2. LOCAL MANIFESTS (TheMuppets) - DISABLED for Baremetal Parity
+# We use local extraction instead.
+rm -f .repo/local_manifests/muppets.xml 2>/dev/null || true
 
 # 3. REPO INIT
 if [ ! -d ".repo" ]; then
@@ -95,8 +87,58 @@ if [ $SUCCESS -eq 0 ]; then
     exit 1
 fi
 
-# 5. BUILD
-echo ">> [$(date)] Sync Complete. Starting Build..."
+# 5. EXTRACT BLOBS (Local Image Extraction)
+echo ">> [$(date)] Starting Local Blob Extraction (Surgical Rescue)..."
+
+EXTRACTED_IMAGES="/android/images/extracted"
+MOUNT_BASE="/tmp/husky_mounts"
+mkdir -p "$MOUNT_BASE/system" "$MOUNT_BASE/system_ext" "$MOUNT_BASE/product" "$MOUNT_BASE/vendor"
+
+# Mount images (Requires privileged container)
+sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/system.img" "$MOUNT_BASE/system" 2>/dev/null || echo "Warning: system.img mount failed"
+sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/system_ext.img" "$MOUNT_BASE/system_ext" 2>/dev/null || echo "Warning: system_ext.img mount failed"
+sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/product.img" "$MOUNT_BASE/product" 2>/dev/null || echo "Warning: product.img mount failed"
+sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/vendor.img" "$MOUNT_BASE/vendor" 2>/dev/null || echo "Warning: vendor.img mount failed"
+
+# Path to proprietary list (Try multiple common locations if structure varies)
+PROPRIETARY_LIST="device/google/shusky/husky/proprietary-files.txt"
+if [ ! -f "$PROPRIETARY_LIST" ]; then
+    PROPRIETARY_LIST="device/google/husky/proprietary-files.txt"
+fi
+
+if [ -f "$PROPRIETARY_LIST" ]; then
+    echo ">> Found proprietary list at $PROPRIETARY_LIST"
+    # We focus on the files Ninja reported as missing
+    CLEAN_LIST=$(grep -v '^#' "$PROPRIETARY_LIST" | grep -E '\.(xml|rc|pb|txt|img)$' | sed 's/^-//')
+
+    for entry in $CLEAN_LIST; do
+        dest_rel_path=$(echo "$entry" | cut -d':' -f1 | cut -d'|' -f1)
+        target_filename=$(echo "$entry" | sed 's/.*[:|]//')
+        full_dest_path="vendor/google/husky/proprietary/$dest_rel_path"
+        
+        if [ ! -f "$full_dest_path" ]; then
+            # Using -name for just the filename to avoid the 'separator' warning
+            base_search=$(basename "$target_filename")
+            FOUND=$(sudo find "$MOUNT_BASE" -type f -name "$base_search" | head -n 1)
+
+            if [ -n "$FOUND" ]; then
+                mkdir -p "$(dirname "$full_dest_path")"
+                sudo cp "$FOUND" "$full_dest_path"
+                sudo chmod 644 "$full_dest_path"
+                sudo chown builder:builder "$full_dest_path"
+                echo "    [✓] Rescued: $base_search"
+            fi
+        fi
+    done
+else
+    echo ">> WARNING: proprietary-files.txt not found. Skipping extraction."
+fi
+
+sudo umount -R "$MOUNT_BASE" 2>/dev/null || true
+
+
+# 6. BUILD
+echo ">> [$(date)] Environment Ready. Starting Build..."
 source build/envsetup.sh
 breakfast $DEVICE
 croot
