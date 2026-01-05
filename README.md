@@ -50,3 +50,59 @@ pkill -f build-lineage
 # 2. Wipe the source tree (WARNING: Deletes downloaded source)
 rm -rf android_source/LINEAGE_22_1   # or appropriate version folder
 ```
+
+
+#### Troubleshooting
+
+Fix broken sync
+```
+cd /media/BIG_STORAGE/lineage-build-2026/android_source/LINEAGE_23_0
+
+# Remove the broken project references from repo's database
+rm -f .repo/project.list
+rm -f .repo/.repo_fetchtimes.json
+
+# Delete all traces of these 7 corrupted projects
+rm -rf .repo/projects/external/AFLplusplus.git
+rm -rf .repo/projects/external/ComputeLibrary.git
+rm -rf .repo/projects/device/qcom/sepolicy_vndr
+rm -rf .repo/project-objects/external/AFLplusplus.git
+rm -rf .repo/project-objects/external/ComputeLibrary.git
+rm -rf .repo/project-objects/device/qcom/sepolicy_vndr
+
+# Delete working directories
+rm -rf external/AFLplusplus
+rm -rf external/ComputeLibrary
+rm -rf device/qcom/sepolicy_vndr
+
+# Force repo to rebuild its database and sync fresh
+repo sync -c --force-sync --no-clone-bundle --no-tags -j1 \
+  external/AFLplusplus \
+  external/ComputeLibrary \
+  device/qcom/sepolicy_vndr/legacy-um \
+  device/qcom/sepolicy_vndr/sm8450 \
+  device/qcom/sepolicy_vndr/sm8550 \
+  device/qcom/sepolicy_vndr/sm8650 \
+  device/qcom/sepolicy_vndr/sm8750
+```
+
+
+```
+cd /media/BIG_STORAGE/lineage-build-2026/android_source/LINEAGE_23_0
+
+# Backup the manifest so we don't lose customizations
+cp -r .repo/manifests /tmp/manifests_backup 2>/dev/null || true
+cp -r .repo/local_manifests /tmp/local_manifests_backup 2>/dev/null || true
+
+# Nuclear option: Delete entire .repo directory
+rm -rf .repo
+
+# Reinitialize repo from scratch
+repo init -u https://github.com/LineageOS/android.git -b lineage-23.0 --git-lfs --depth=1
+
+# Restore any local manifests if they existed
+cp -r /tmp/local_manifests_backup .repo/local_manifests 2>/dev/null || true
+
+# Now sync - this will treat everything as a fresh checkout
+repo sync -c -j$(nproc) --force-sync --no-clone-bundle --no-tags
+```

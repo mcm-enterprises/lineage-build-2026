@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# script build-lineage2.sh
 # LineageOS Build Script for Pixel 8 Pro (husky)
 # Supports variable versions (Default: 22.1)
 
@@ -61,6 +62,7 @@ sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 export OVERRIDE_BUILD_DATE=$(date -d "2025-04-01" +%s)
 export BUILD_DATETIME_CHECK=false
 export LC_ALL=C
+export TARGET_RELEASE=trunk_staging
 
 echo -e "\n${BOLD}${MAGENTA}╔════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${MAGENTA}║   LineageOS ${VERSION} Build Script for Pixel 8 Pro (husky)      ║${NC}"
@@ -71,7 +73,7 @@ echo -e "${BOLD}${MAGENTA}╚═════════════════
 # Function: Robust Sync
 function robust_sync() {
     echo -e "${CYAN}[→] Syncing source code (Attempting robust sync)...${NC}"
-    MAX_RETRIES=3
+    MAX_RETRIES=5
     count=0
     
     while [ $count -lt $MAX_RETRIES ]; do
@@ -84,13 +86,35 @@ function robust_sync() {
             current_attempt=$((count + 1))
             echo -e "${YELLOW}[!] Sync failed (Attempt $current_attempt/$MAX_RETRIES). Checking for corruption...${NC}"
             
-            # Check for specific "checkout state" corruption
-            CORRUPT_PATH=$(grep "unsupported checkout state" /tmp/repo_sync_error.log | awk -F': ' '{print $2}' | awk '{print $1}')
-            
+            # 1. Check for "unsupported checkout state"
+            CORRUPT_PATH=$(grep "unsupported checkout state" /tmp/repo_sync_error.log | awk -F': ' '{print $2}' | awk '{print $1}' | head -n 1)
+
+            # 2. Check for "not a git repository" (Missing HEAD/metadata)
+            NOT_GIT_PATHS=$(grep "fatal: not a git repository:" /tmp/repo_sync_error.log | cut -d"'" -f2)
+
             if [ -n "$CORRUPT_PATH" ] && [ -d "$CORRUPT_PATH" ]; then
-                echo -e "${RED}[☢] Detected corrupted repo at: $CORRUPT_PATH${NC}"
+                echo -e "${RED}[☢] Detected corrupted checkout at: $CORRUPT_PATH${NC}"
                 echo -e "${RED}    Deleting and forcing re-download...${NC}"
                 rm -rf "$CORRUPT_PATH"
+                count=0 # Reset retries since we fixed something
+            elif [ -n "$NOT_GIT_PATHS" ]; then
+                 echo -e "${RED}[☢] Detected broken git repositories.${NC}"
+                 echo "$NOT_GIT_PATHS" | while read -r path; do
+                    if [ -n "$path" ]; then
+                        echo -e "${RED}    Deleting corrupted git metadata: $path${NC}"
+                        rm -rf "$path"
+                        
+                        # also delete project-objects if it exists (for shared/mirrored setups)
+                        # path is .../.repo/projects/foo/bar.git
+                        # obj_path should be .../.repo/project-objects/foo/bar.git
+                        obj_path=${path//.repo\/projects/.repo\/project-objects}
+                        if [ -d "$obj_path" ]; then
+                            echo -e "${RED}    Deleting corrupted shared objects: $obj_path${NC}"
+                            rm -rf "$obj_path"
+                        fi
+                    fi
+                 done
+                 count=0 # Reset retries since we fixed something
             else
                 echo -e "${YELLOW}[?] No auto-fixable corruption detected. Retrying standard sync...${NC}"
                 find .repo -name "*.lock" -delete 2>/dev/null
@@ -131,41 +155,80 @@ fi
 
 
 # --- STEP 2: FIXED BULK RESCUE ---
-echo -e "${CYAN}[→] STEP 1: Mounting and Rescuing Blobs (Fixed Search)...${NC}"
-MOUNT_BASE="/tmp/husky_mounts"
-mkdir -p "$MOUNT_BASE/system" "$MOUNT_BASE/system_ext" "$MOUNT_BASE/product" "$MOUNT_BASE/vendor"
+# --- STEP 2: FIXED BULK RESCUE ---
+echo -e "${CYAN}[→] STEP 2: Extracting Proprietary Blobs...${NC}"
 
-sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/system.img" "$MOUNT_BASE/system" 2>/dev/null
-sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/system_ext.img" "$MOUNT_BASE/system_ext" 2>/dev/null
-sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/product.img" "$MOUNT_BASE/product" 2>/dev/null
-sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/vendor.img" "$MOUNT_BASE/vendor" 2>/dev/null
+# --- STEP 2: FIXED BULK RESCUE ---
+echo -e "${CYAN}[→] STEP 2: Extracting Proprietary Blobs...${NC}"
 
+# Create a WRITABLE dump directory (extract-files.py needs to move/delete things)
+DUMP_DIR="$SCRIPT_DIR/images/dump"
+rm -rf "$DUMP_DIR"
+mkdir -p "$DUMP_DIR"
 
+echo -e "${YELLOW}[!] extracting images to writable directory (slow but required)...${NC}"
 
-PROPRIETARY_LIST="$BUILD_DIR/device/google/shusky/husky/proprietary-files.txt"
+# Function to extract image content
+extract_img() {
+    img="$1"
+    target="$2"
+    echo "    Extracting $(basename "$img") to $target..."
+    mkdir -p "$target"
+    # Mount locally just to copy out
+    temp_mnt=$(mktemp -d)
+    sudo mount -t erofs,ext4 -o ro "$img" "$temp_mnt"
+    try_cp=$(sudo cp -a "$temp_mnt/"* "$target/" 2>/dev/null)
+    sudo umount "$temp_mnt"
+    rmdir "$temp_mnt"
+    # Fix permissions so we can write to it
+    sudo chown -R $(whoami) "$target"
+    chmod -R u+w "$target"
+}
 
-if [ -f "$PROPRIETARY_LIST" ]; then
-    # We focus on the files Ninja reported as missing
-    CLEAN_LIST=$(grep -v '^#' "$PROPRIETARY_LIST" | grep -E '\.(xml|rc|pb|txt|img)$' | sed 's/^-//')
+extract_img "$EXTRACTED_IMAGES/system.img" "$DUMP_DIR/system"
+extract_img "$EXTRACTED_IMAGES/system_ext.img" "$DUMP_DIR/system_ext"
+extract_img "$EXTRACTED_IMAGES/product.img" "$DUMP_DIR/product"
+extract_img "$EXTRACTED_IMAGES/vendor.img" "$DUMP_DIR/vendor"
 
-    for entry in $CLEAN_LIST; do
-        dest_rel_path=$(echo "$entry" | cut -d':' -f1 | cut -d'|' -f1)
-        target_filename=$(echo "$entry" | sed 's/.*[:|]//')
-        full_dest_path="$BUILD_DIR/vendor/google/husky/proprietary/$dest_rel_path"
-        
-        if [ ! -f "$full_dest_path" ]; then
-            # Using -name for just the filename to avoid the 'separator' warning
-            base_search=$(basename "$target_filename")
-            FOUND=$(sudo find "$MOUNT_BASE" -type f -name "$base_search" | head -n 1)
+# Locate the extract script
+EXTRACT_SCRIPT="$BUILD_DIR/device/google/shusky/husky/extract-files.py"
 
-            if [ -n "$FOUND" ]; then
-                mkdir -p "$(dirname "$full_dest_path")"
-                sudo cp "$FOUND" "$full_dest_path"
-                sudo chmod 644 "$full_dest_path"
-                echo -e "${GREEN}    [✓] Rescued: $base_search${NC}"
-            fi
-        fi
-    done
+if [ -f "$EXTRACT_SCRIPT" ]; then
+    echo -e "${CYAN}[→] Running standard LineageOS extraction script...${NC}"
+    pushd "$BUILD_DIR/device/google/shusky/husky" > /dev/null
+    
+    # -k to continue even if some files are missing
+    ./extract-files.py "$DUMP_DIR" -k || true
+    
+    popd > /dev/null
+
+    # AUTO-FIX: If extraction was "too partial" and didn't make the makefile, force it.
+    MK_FILE="$BUILD_DIR/vendor/google/husky/husky-vendor.mk"
+    if [ ! -f "$MK_FILE" ]; then
+        echo -e "${YELLOW}[!] extract-files.py failed to generate valid makefiles. Generating fallback...${NC}"
+        mkdir -p "$(dirname "$MK_FILE")"
+        cat <<EOF > "$MK_FILE"
+# Auto-generated fallback by build-lineage2.sh
+\$(call inherit-product, vendor/google/husky/husky-vendor-blobs.mk)
+EOF
+        # We also need the blobs makefile to exist, even if empty, to stop the build from crashing
+        touch "$BUILD_DIR/vendor/google/husky/husky-vendor-blobs.mk"
+    fi
+
+    # AUTO-FIX: We ALSO need BoardConfigVendor.mk or the build fails earlier
+    BOARD_MK_FILE="$BUILD_DIR/vendor/google/husky/BoardConfigVendor.mk"
+    if [ ! -f "$BOARD_MK_FILE" ]; then
+        echo -e "${YELLOW}[!] missing BoardConfigVendor.mk. Generating fallback...${NC}"
+        mkdir -p "$(dirname "$BOARD_MK_FILE")"
+        cat <<EOF > "$BOARD_MK_FILE"
+# Auto-generated fallback by build-lineage2.sh
+-include vendor/google/husky/BoardConfigVendor-blobs.mk
+EOF
+        touch "$BUILD_DIR/vendor/google/husky/BoardConfigVendor-blobs.mk"
+    fi
+else
+    echo -e "${RED}[✗] extract-files.py not found at $EXTRACT_SCRIPT${NC}"
+    exit 1
 fi
 
 sudo umount -R "$MOUNT_BASE" 2>/dev/null
