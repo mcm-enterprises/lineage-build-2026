@@ -114,3 +114,85 @@ If the build completes then the output file will be available in a path like thi
 ```
 
 The file size should be about 800-900MB
+
+## 4. Prerequisites: ADB & Bootloader Unlock
+
+Before you can flash anything, you need `adb` and `fastboot` installed on your computer, and your device's bootloader must be unlocked.
+
+### Step A: Install ADB & Fastboot
+You run these commands **on your computer** (Ubuntu/Linux terminal), not on the phone.
+```bash
+sudo apt update
+sudo apt install adb fastboot
+```
+
+### Step B: Prepare the Phone
+1. Go to **Settings > About phone** and tap **Build number** 7 times to enable Developer Options.
+2. Go to **Settings > System > Developer options**.
+3. Enable **OEM unlocking** (requires internet connection).
+4. Enable **USB debugging**.
+
+### Step C: Unlock Bootloader
+**WARNING: This will wipe ALL data on your device!**
+1. Connect your phone to your computer via USB.
+2. Open a terminal on your computer and verify connection:
+   ```bash
+   adb devices
+   ```
+   *Authorize the computer on your phone screen if prompted.*
+3. Reboot to bootloader:
+   ```bash
+   adb reboot bootloader
+   ```
+4. Unlock the bootloader:
+   ```bash
+   fastboot flashing unlock
+   ```
+5. Use the volume keys on the phone to select "Unlock the bootloader" and confirm with the Power button.
+6. The device will wipe and reboot. You may need to skip through setup to re-enable USB debugging for the later steps.
+
+## 5. Flashing Instructions
+
+**WARNING**: These instructions assume you have an unlocked bootloader. Unlocking the bootloader wipes user data.
+
+### Step 1: Flash Recovery & Boot Images
+You must flash the boot and recovery images to ensure the device can boot into the LineageOS recovery environment.
+
+1. Reboot your device to the bootloader (Fastboot Mode):
+   ```bash
+   adb reboot bootloader
+   ```
+
+2. Flash the necessary images from the output directory:
+   ```bash
+   cd android_source/LINEAGE_23_1/out/target/product/husky/
+   
+   fastboot flash boot boot.img
+   fastboot flash dtbo dtbo.img
+   fastboot flash vendor_boot vendor_boot.img
+   fastboot flash vendor_kernel_boot vendor_kernel_boot.img
+   fastboot flash init_boot init_boot.img
+   ```
+
+### Step 2: Boot into Recovery
+1. Use the volume keys to select **Recovery Mode** on the device menu and press Power.
+2. If successful, you will see the LineageOS Recovery screen.
+
+### Step 3: Factory Reset (Recommended)
+*Required if coming from stock firmware or a different ROM.*
+
+1. In Recovery, tap **Factory Reset**.
+2. Select **Format data / factory reset**.
+3. Confirm by selecting **Format data**.
+
+### Step 4: Flash the LineageOS Zip
+1. On the device, return to the main menu.
+2. Select **Apply Update** -> **Apply from ADB**.
+3. On your computer, sideload the zip file:
+   ```bash
+   adb sideload lineage-23.1-20260107-UNOFFICIAL-husky.zip
+   ```
+   *Note: If the process stops at 47% and says "Total xfer: 1.00x", it is successful.*
+
+4. Return to the main menu and tap **Reboot system now**.
+
