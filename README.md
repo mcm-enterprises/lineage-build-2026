@@ -106,3 +106,11 @@ cp -r /tmp/local_manifests_backup .repo/local_manifests 2>/dev/null || true
 # Now sync - this will treat everything as a fresh checkout
 repo sync -c -j$(nproc) --force-sync --no-clone-bundle --no-tags
 ```
+
+### Roms
+If the build completes then the output file will be available in a path like this
+```
+/media/BIG_STORAGE/lineage-build-2026/android_source/LINEAGE_23_1/out/target/product/husky/lineage-23.1-20260107-UNOFFICIAL-husky.zip
+```
+
+The file size should be about 800-900MB

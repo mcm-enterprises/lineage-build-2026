@@ -142,9 +142,128 @@ fi
 
 # Run Sync (Unless skipped)
 if [ "$SKIP_SYNC" = false ]; then
+    # PRE-SYNC: Revert our automated patches so repo sync doesn't conflict
+    # We ignore errors in case the file doesn't exist yet
+    if [ -f "$BUILD_DIR/device/google/zuma/device.mk" ]; then
+         echo -e "${YELLOW}[!] Reverting local patches to allow clean sync...${NC}"
+         git -C "$BUILD_DIR/device/google/zuma" checkout device.mk 2>/dev/null || true
+    fi
+
     robust_sync || exit 1
 else
     echo -e "${YELLOW}[!] Skipping source sync as requested.${NC}"
+fi
+
+# --- STEP 0.1: RE-APPLY PATCHES ---
+# We apply this AFTER sync to ensure it persists directly before build
+echo -e "${CYAN}[→] Applying automated patches...${NC}"
+
+# Patch 1: Wifi Ext Device Config
+if [ -f "$BUILD_DIR/device/google/zuma/device.mk" ]; then
+    # Robustly handle any state of this line
+    sed -i 's|^include hardware/google/pixel/wifi_ext/device.mk|BOARD_VENDOR_SEPOLICY_DIRS += hardware/google/pixel-sepolicy/wifi_ext|' "$BUILD_DIR/device/google/zuma/device.mk"
+    sed -i 's|^# include hardware/google/pixel/wifi_ext/device.mk|BOARD_VENDOR_SEPOLICY_DIRS += hardware/google/pixel-sepolicy/wifi_ext|' "$BUILD_DIR/device/google/zuma/device.mk"
+    
+    # Also include the pixelstats policy which is missing
+    if ! grep -q "hardware/google/pixel-sepolicy/pixelstats" "$BUILD_DIR/device/google/zuma/device.mk"; then
+        echo "BOARD_VENDOR_SEPOLICY_DIRS += hardware/google/pixel-sepolicy/pixelstats" >> "$BUILD_DIR/device/google/zuma/device.mk"
+        echo -e "${GREEN}[✓] Added pixel-sepolicy/pixelstats to device.mk${NC}"
+    fi
+    
+    echo -e "${GREEN}[✓] Patched device/google/zuma/device.mk (SEPolicy Only)${NC}"
+fi
+
+
+
+# Helper function to check if a type is already defined in the build tree
+function is_type_defined() {
+    local type_name="$1"
+    local search_dir="$BUILD_DIR/device/google/zuma"
+    # Also check hardware/google because that's where pixel-sepolicy lives
+    local search_dir2="$BUILD_DIR/hardware/google"
+    
+    if grep -r "type $type_name" "$search_dir" >/dev/null 2>&1 || grep -r "type $type_name" "$search_dir2" >/dev/null 2>&1; then
+        return 0 # True, it is defined
+    else
+        return 1 # False
+    fi
+}
+
+
+
+
+
+
+
+
+
+
+# --- STEP 0.2: MEMORY CHECK & SWAP ---
+function setup_swap() {
+    # Check total memory + swap
+    local total_mem_mb=$(free -m | awk '/^Mem:/{print $2}')
+    local total_swap_mb=$(free -m | awk '/^Swap:/{print $2}')
+    local total_mb=$((total_mem_mb + total_swap_mb))
+    
+    # Target: 48GB (Soong can be hungry)
+    local target_mb=49152
+    
+    if [ $total_mb -lt $target_mb ]; then
+        echo -e "${YELLOW}[!] Low memory detected (Total available: ${total_mb}MB). Setting up extra swap...${NC}"
+        
+        SWAP_FILE="$SCRIPT_DIR/swapfile.img"
+        # Calculate needed, but just force 24GB to be safe and simple
+        NEEDED_MB=24576
+        
+        if [ ! -f "$SWAP_FILE" ]; then
+            echo -e "${CYAN}[→] Creating ${NEEDED_MB}MB swap file at $SWAP_FILE (This may take a minute)...${NC}"
+            # heavy operation, use dd if fallocate fails (some FS don't support fallocate)
+            if ! sudo fallocate -l ${NEEDED_MB}M "$SWAP_FILE"; then
+                 echo -e "${YELLOW}[!] fallocate failed, trying dd...${NC}"
+                 sudo dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$NEEDED_MB status=progress
+            fi
+            sudo chmod 600 "$SWAP_FILE"
+            sudo mkswap "$SWAP_FILE"
+        fi
+        
+        if ! swapon --show | grep -q "$SWAP_FILE"; then
+            echo -e "${CYAN}[→] Activating swap...${NC}"
+            sudo swapon "$SWAP_FILE"
+        else
+            echo -e "${GREEN}[✓] Extra swap already active.${NC}"
+        fi
+    else
+        echo -e "${GREEN}[✓] Memory check passed (Total: ${total_mb}MB).${NC}"
+    fi
+}
+setup_swap
+
+# --- STEP 0.5: ENSURE DEVICE TREE ---
+# Ensure we have the device specific trees (Pixel 8 Pro - husky)
+# We manually add them to local_manifests to guarantee they are fetched
+LOCAL_MANIFEST_DIR=".repo/local_manifests"
+MANIFEST_FILE="$LOCAL_MANIFEST_DIR/pixel_husky.xml"
+
+if [ ! -d "device/google/shusky" ] || [ ! -d "device/google/husky" ]; then
+    echo -e "${CYAN}[→] Device trees not found. Adding husky/shusky to local_manifests...${NC}"
+    mkdir -p "$LOCAL_MANIFEST_DIR"
+    
+    # We add likely dependencies. 
+    # device/google/shusky (Unified platform)
+    # device/google/husky (Device specific)
+    # kernel/google/zuma (Kernel)
+    # hardware/google/pixel (Common hardware)
+    cat <<EOF > "$MANIFEST_FILE"
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+    <project name="LineageOS/android_device_google_shusky" path="device/google/shusky" remote="github" />
+    <project name="LineageOS/android_device_google_husky" path="device/google/husky" remote="github" />
+</manifest>
+EOF
+
+    echo -e "${CYAN}[→] Syncing device specific repositories...${NC}"
+    # We call robust_sync again to fetch the new projects
+    robust_sync || exit 1
 fi
 
 # --- STEP 1: CLEANUP (If requested) ---
@@ -191,11 +310,26 @@ extract_img "$EXTRACTED_IMAGES/product.img" "$DUMP_DIR/product"
 extract_img "$EXTRACTED_IMAGES/vendor.img" "$DUMP_DIR/vendor"
 
 # Locate the extract script
-EXTRACT_SCRIPT="$BUILD_DIR/device/google/shusky/husky/extract-files.py"
+# Try common paths
+POSSIBLE_SCRIPTS=(
+    "$BUILD_DIR/device/google/shusky/extract-files.py"
+    "$BUILD_DIR/device/google/husky/extract-files.py"
+    "$BUILD_DIR/device/google/shusky/husky/extract-files.py"
+)
 
-if [ -f "$EXTRACT_SCRIPT" ]; then
+EXTRACT_SCRIPT=""
+for script in "${POSSIBLE_SCRIPTS[@]}"; do
+    if [ -f "$script" ]; then
+        EXTRACT_SCRIPT="$script"
+        echo -e "${CYAN}[→] Found extraction script at $EXTRACT_SCRIPT${NC}"
+        break
+    fi
+done
+
+if [ -n "$EXTRACT_SCRIPT" ]; then
     echo -e "${CYAN}[→] Running standard LineageOS extraction script...${NC}"
-    pushd "$BUILD_DIR/device/google/shusky/husky" > /dev/null
+    SCRIPT_DIR_PARENT=$(dirname "$EXTRACT_SCRIPT")
+    pushd "$SCRIPT_DIR_PARENT" > /dev/null
     
     # -k to continue even if some files are missing
     ./extract-files.py "$DUMP_DIR" -k || true
@@ -227,7 +361,11 @@ EOF
         touch "$BUILD_DIR/vendor/google/husky/BoardConfigVendor-blobs.mk"
     fi
 else
-    echo -e "${RED}[✗] extract-files.py not found at $EXTRACT_SCRIPT${NC}"
+    echo -e "${RED}[✗] extract-files.py not found using defaults.${NC}"
+    echo -e "    Checked locations:"
+    for script in "${POSSIBLE_SCRIPTS[@]}"; do
+        echo -e "    - $script"
+    done
     exit 1
 fi
 
