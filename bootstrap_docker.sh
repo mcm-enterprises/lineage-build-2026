@@ -1,39 +1,17 @@
-#!/bin/bash
-set -e
-
-echo ">> [$(date)] Bootstrapping Docker Build Environment..."
-
-# 1. Check Docker
-if ! command -v docker &> /dev/null; then
-    echo "Error: 'docker' command not found. Please install Docker Engine."
-    echo "  sudo apt install docker.io docker-compose-v2"
-    exit 1
-fi
-
-# 2. Switch Context (Crucial for I/O performance)
-CURRENT_CONTEXT=$(docker context show)
-if [ "$CURRENT_CONTEXT" != "default" ]; then
-    echo ">> Switching Docker context from '$CURRENT_CONTEXT' to 'default' (Native Engine)..."
-    docker context use default || echo "Warning: Could not switch context. If using Docker Desktop, performance may be poor."
-else
-    echo ">> Docker context is 'default' (Good)."
-fi
-
-# 3. Create Source Directories
-echo ">> Creating isolated source directories in docker_source/..."
-mkdir -p docker_source/lineage
-mkdir -p docker_source/zips
-mkdir -p docker_source/ccache
-
-# 4. Permissions Check
-# Ensure current user owns these folders so Docker doesn't make them root-only
-# (Our entrypoint handles the interior, but the folder itself must be accessible)
-# We assume the user running this script is the owner.
-
-# 5. Launch
-echo ">> Building and Starting Container..."
-cd docker_env
-docker compose up -d --build
-
-echo ">> [$(date)] Docker Build Started!"
-echo ">> Monitor logic: docker logs -f lineage-builder-husky"
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+command -v docker >/dev/null || { echo "Install Docker Engine and the Compose v2 plugin." >&2; exit 1; }
+docker compose version >/dev/null
+docker info >/dev/null
+# Keep the user's selected Docker context.
+export HOST_UID="$(id -u)" HOST_GID="$(id -g)"
+[[ "$HOST_UID" != 0 ]] || { echo "Run as your regular user, not root." >&2; exit 1; }
+mkdir -p "$SCRIPT_DIR"/docker_source/{lineage,zips,logs}
+for directory in lineage zips logs; do
+    [[ -w "$SCRIPT_DIR/docker_source/$directory" ]] || { echo "Not writable: docker_source/$directory. Fix its ownership first." >&2; exit 1; }
+done
+docker compose -f "$SCRIPT_DIR/docker_env/docker-compose.yml" config --quiet
+docker compose -f "$SCRIPT_DIR/docker_env/docker-compose.yml" up -d --build
+echo "Monitor: docker compose -f $SCRIPT_DIR/docker_env/docker-compose.yml logs -f"
+echo "Stop: docker compose -f $SCRIPT_DIR/docker_env/docker-compose.yml stop"

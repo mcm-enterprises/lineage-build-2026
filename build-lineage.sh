@@ -1,105 +1,118 @@
-#!/bin/bash
-
-# LineageOS 22.1 Build Script for Pixel 8 Pro (husky)
-# Final "Obsolete-Fix" Edition
-
-# --- COLORS ---
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; 
-CYAN='\033[0;36m'; MAGENTA='\033[1;35m'; BOLD='\033[1m'; NC='\033[0m'
-
-# --- CONFIG ---
-DEVICE="husky"
-SRC_NAME="android_source/LINEAGE_22_1"
-BUILD_DIR="/media/BIG_STORAGE/lineageOS/$SRC_NAME"
-EXTRACTED_IMAGES="/media/BIG_STORAGE/lineageOS/images/extracted"
-JOBS=$(nproc --all)
-
-# --- UBUNTU 25.10 DATE FIX ---
-function date() {
-  if [[ "$*" == *"TZ=\"GMT\""* ]]; then
-    local args=$(echo "$*" | sed 's/TZ="GMT"//g')
-    command date $args
-  else
-    command date "$@"
-  fi
-}
-export -f date
-
-# OS Fixes
-sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-export OVERRIDE_BUILD_DATE=$(date -d "2025-04-01" +%s)
-export BUILD_DATETIME_CHECK=false
+#!/usr/bin/env bash
+# Shared host/container workflow. Deliberately support one verified device/branch.
+set -Eeo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export PATH="$HOME/bin:$PATH"
 export LC_ALL=C
-
-echo -e "\n${BOLD}${MAGENTA}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${MAGENTA}║   LineageOS 22.1 Build Script for Pixel 8 Pro (husky)     ║${NC}"
-echo -e "${BOLD}${MAGENTA}║           Final Obsolete-Path & Search Fix                 ║${NC}"
-echo -e "${BOLD}${MAGENTA}╚════════════════════════════════════════════════════════════╝${NC}\n"
-
-# --- STEP 1: FIXED BULK RESCUE ---
-echo -e "${CYAN}[→] STEP 1: Mounting and Rescuing Blobs (Fixed Search)...${NC}"
-MOUNT_BASE="/tmp/husky_mounts"
-mkdir -p "$MOUNT_BASE/system" "$MOUNT_BASE/system_ext" "$MOUNT_BASE/product" "$MOUNT_BASE/vendor"
-
-sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/system.img" "$MOUNT_BASE/system" 2>/dev/null
-sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/system_ext.img" "$MOUNT_BASE/system_ext" 2>/dev/null
-sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/product.img" "$MOUNT_BASE/product" 2>/dev/null
-sudo mount -t erofs,ext4 -o ro "$EXTRACTED_IMAGES/vendor.img" "$MOUNT_BASE/vendor" 2>/dev/null
-
-
-
-PROPRIETARY_LIST="$BUILD_DIR/device/google/shusky/husky/proprietary-files.txt"
-
-if [ -f "$PROPRIETARY_LIST" ]; then
-    # We focus on the files Ninja reported as missing
-    CLEAN_LIST=$(grep -v '^#' "$PROPRIETARY_LIST" | grep -E '\.(xml|rc|pb|txt|img)$' | sed 's/^-//')
-
-    for entry in $CLEAN_LIST; do
-        dest_rel_path=$(echo "$entry" | cut -d':' -f1 | cut -d'|' -f1)
-        target_filename=$(echo "$entry" | sed 's/.*[:|]//')
-        full_dest_path="$BUILD_DIR/vendor/google/husky/proprietary/$dest_rel_path"
-        
-        if [ ! -f "$full_dest_path" ]; then
-            # Using -name for just the filename to avoid the 'separator' warning
-            base_search=$(basename "$target_filename")
-            FOUND=$(sudo find "$MOUNT_BASE" -type f -name "$base_search" | head -n 1)
-
-            if [ -n "$FOUND" ]; then
-                mkdir -p "$(dirname "$full_dest_path")"
-                sudo cp "$FOUND" "$full_dest_path"
-                sudo chmod 644 "$full_dest_path"
-                echo -e "${GREEN}    [✓] Rescued: $base_search${NC}"
-            fi
-        fi
+DEVICE=husky
+BRANCH=${BRANCH:-lineage-22.1}
+BUILD_DIR=${BUILD_DIR:-$SCRIPT_DIR/android_source/LINEAGE_22_1}
+OUTPUT_DIR=${OUTPUT_DIR:-$SCRIPT_DIR/zips}
+LOG_DIR=${LOG_DIR:-$SCRIPT_DIR/logs}
+SYNC_JOBS=${SYNC_JOBS:-4}
+SYNC_RETRIES=${SYNC_RETRIES:-3}
+SYNC_RETRY_DELAY=${SYNC_RETRY_DELAY:-15}
+MIN_FREE_GB=${MIN_FREE_GB:-300}
+ACTION=${1:-all}
+fail() { echo "ERROR: $*" >&2; exit 1; }
+usage() {
+    echo "Usage: $0 [check|sync|build|all]"
+    echo "Defaults: husky, lineage-22.1. Set BUILD_DIR, OUTPUT_DIR, JOBS, SYNC_JOBS as needed."
+}
+case "$ACTION" in
+    -h|--help) usage; exit 0 ;;
+    check|sync|build|all) ;;
+    *) usage; exit 2 ;;
+esac
+[[ $# -le 1 ]] || fail "Only one action is accepted."
+[[ "$BRANCH" == lineage-22.1 ]] || fail "Only lineage-22.1 is configured. Use a separate, verified manifest for another release."
+for value in "$SYNC_JOBS" "$SYNC_RETRIES" "$MIN_FREE_GB"; do
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail "Job, retry and disk limits must be positive integers."
+done
+[[ "$SYNC_RETRY_DELAY" =~ ^[0-9]+$ ]] || fail "SYNC_RETRY_DELAY must be a nonnegative integer."
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || fail "An x86_64 Linux host is required."
+[[ $EUID -ne 0 ]] || fail "Run as your regular user, not root."
+for tool in repo git python3 flock rsync; do
+    command -v "$tool" >/dev/null || fail "Missing $tool. Run setup_build_env.sh or use Docker."
+done
+git lfs version >/dev/null || fail "git-lfs is required for vendor blobs."
+git var GIT_AUTHOR_IDENT >/dev/null 2>&1 || fail "Configure git user.name and user.email first."
+mkdir -p "$BUILD_DIR" "$OUTPUT_DIR" "$LOG_DIR"
+BUILD_DIR=$(cd "$BUILD_DIR" && pwd -P)
+OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd -P)
+LOG_DIR=$(cd "$LOG_DIR" && pwd -P)
+# Hold this descriptor through repo and the build; never unlink the lock file.
+exec 9>"$BUILD_DIR/.lineage-build.lock"
+flock -n 9 || fail "Another workflow is using $BUILD_DIR."
+LOG_FILE="$LOG_DIR/husky-$(date +%Y%m%d-%H%M%S)-$$.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+trap 'code=$?; echo "ERROR: line $LINENO failed (exit $code). Log: $LOG_FILE" >&2; exit "$code"' ERR
+cd "$BUILD_DIR"
+free_gb=$(df -Pk . | awk 'NR==2 {print int($4/1024/1024)}')
+[[ "$free_gb" -ge "$MIN_FREE_GB" ]] || fail "Only ${free_gb} GiB free; require ${MIN_FREE_GB}. For an existing tree, set MIN_FREE_GB to your remaining-space budget."
+mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
+# Respect a container memory limit when present.
+if [[ -r /sys/fs/cgroup/memory.max ]]; then
+    limit=$(cat /sys/fs/cgroup/memory.max)
+    if [[ "$limit" =~ ^[0-9]+$ ]] && (( limit / 1024 < mem_kb )); then mem_kb=$((limit / 1024)); fi
+fi
+memory_jobs=$((mem_kb / 1024 / 1024 / 4))
+(( memory_jobs > 0 )) || memory_jobs=1
+cpu_jobs=$(nproc)
+if (( memory_jobs < cpu_jobs )); then cpu_jobs=$memory_jobs; fi
+JOBS=${JOBS:-$cpu_jobs}
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || fail "JOBS must be a positive integer."
+if (( mem_kb < 32 * 1024 * 1024 )); then echo "WARNING: Less than 32 GiB RAM available. Soong may require additional RAM/swap even with JOBS=$JOBS."; fi
+echo "Device=$DEVICE Branch=$BRANCH Build=$BUILD_DIR Jobs=$JOBS SyncJobs=$SYNC_JOBS"
+echo "Log: $LOG_FILE"
+# Refuse old manifests rather than silently mixing or discarding a user's tree.
+python3 "$SCRIPT_DIR/scripts/check_manifest.py" "$BUILD_DIR/.repo/local_manifests"
+if [[ -d .repo/manifests/.git ]]; then
+    existing_branch=$(git -C .repo/manifests config --get branch.default.merge)
+    [[ "$existing_branch" == "refs/heads/$BRANCH" ]] || fail "Existing manifest branch is $existing_branch. Use a separate BUILD_DIR for $BRANCH."
+fi
+if [[ "$ACTION" == check ]]; then echo "Preflight passed. No source downloaded or compilation started."; exit 0; fi
+sync_sources() {
+    # .repo may exist after a failed init; always run the idempotent init first.
+    repo init -u https://github.com/LineageOS/android.git -b "$BRANCH" --git-lfs --no-clone-bundle
+    mkdir -p .repo/local_manifests
+    cp "$SCRIPT_DIR/local_manifests/husky.xml" .repo/local_manifests/husky.xml
+    local attempt
+    for ((attempt=1; attempt<=SYNC_RETRIES; attempt++)); do
+        if repo sync -c -j"$SYNC_JOBS" --no-clone-bundle --no-tags --fail-fast; then return 0; fi
+        echo "Sync attempt $attempt/$SYNC_RETRIES failed."
+        if (( attempt < SYNC_RETRIES )); then sleep "$SYNC_RETRY_DELAY"; fi
     done
-fi
-
-sudo umount -R "$MOUNT_BASE" 2>/dev/null
-
-# --- STEP 2: BUILD CONFIG (CCACHE REMOVED FOR STABILITY) ---
-echo -e "\n${CYAN}[→] STEP 2: Initializing Build Environment (Strict Path)...${NC}"
-cd "$BUILD_DIR" || exit 1
-
-# Completely unset ccache to bypass "Disallowed PATH tool" errors
-unset USE_CCACHE
-unset CCACHE_DIR
-unset CCACHE_EXEC
-unset CC_WRAPPER
-unset TEMPORARY_DISABLE_PATH_RESTRICTIONS
-
+    fail "Source sync failed. Fix the first reported repository/network error, then rerun sync."
+}
+if [[ "$ACTION" == sync || "$ACTION" == all ]]; then sync_sources; fi
+if [[ "$ACTION" == sync ]]; then echo "Sync complete."; exit 0; fi
+[[ -f build/envsetup.sh ]] || fail "Missing source tree. Run sync first."
+python3 "$SCRIPT_DIR/scripts/check_vendor.py" "$BUILD_DIR"
+# Remove inherited workaround flags; use the toolchain shipped with this branch.
+unset USE_CCACHE CCACHE_DIR CCACHE_EXEC CC_WRAPPER TEMPORARY_DISABLE_PATH_RESTRICTIONS
+unset OVERRIDE_BUILD_DATE BUILD_DATETIME_CHECK
+# Android shell helpers are not compatible with nounset.
 source build/envsetup.sh
-breakfast "$DEVICE"
-
-# --- STEP 3: LAUNCH ---
-echo -e "\n${CYAN}[→] STEP 3: Starting Ninja build...${NC}"
-
-# We use 'm bacon' to generate the final OTA zip
-if m bacon -j"$JOBS"; then
-    echo -e "\n${BOLD}${GREEN}SUCCESS! BUILD COMPLETED.${NC}"
-    echo -e "${BOLD}Your flashable zip is here:${NC}"
-    ls -lh out/target/product/husky/lineage-*.zip
-else
-    echo -e "\n${RED}[✗] Build failed at the final stage.${NC}"
-    exit 1
-fi
-
+breakfast "$DEVICE" userdebug
+product_dir="${OUT_DIR:-out}/target/product/$DEVICE"
+shopt -s nullglob
+declare -A previous_zips=()
+for zip in "$product_dir"/lineage-*.zip; do
+    previous_zips["$zip"]=$(stat -c '%y:%s:%i' "$zip")
+done
+m bacon -j"$JOBS"
+fresh_zips=()
+for zip in "$product_dir"/lineage-*.zip; do
+    if [[ "${previous_zips[$zip]:-}" != "$(stat -c '%y:%s:%i' "$zip")" ]]; then
+        fresh_zips+=("$zip")
+    fi
+done
+[[ ${#fresh_zips[@]} -gt 0 ]] || fail "Build returned success but produced no new lineage ZIP in $product_dir."
+rsync -a "${fresh_zips[@]}" "$OUTPUT_DIR/"
+for image in boot.img dtbo.img vendor_boot.img vbmeta.img recovery.img; do
+    [[ ! -f "$product_dir/$image" ]] || rsync -a "$product_dir/$image" "$OUTPUT_DIR/"
+done
+repo manifest -r -o "$OUTPUT_DIR/source-manifest.xml"
+(cd "$OUTPUT_DIR" && sha256sum -- "${fresh_zips[@]##*/}" > SHA256SUMS)
+echo "Build complete. Artifacts and source-manifest.xml: $OUTPUT_DIR"
