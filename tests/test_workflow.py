@@ -261,6 +261,53 @@ class VendorTests(unittest.TestCase):
             (vendor / 'proprietary/config.xml').write_text('<config/>')
             checker.check(directory, 'vendor/realme/RM6785-common', 'RM6785-common-vendor.mk')
 
+class DockerConfigurationTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('docker'), 'Compose CLI is unavailable')
+    def test_profiles_use_isolated_linux_sources_and_amd64(self):
+        import json
+        volumes = []
+        for profile in ('pixel', 'realme6'):
+            env = dict(os.environ, BUILD_PROFILE=profile, BUILD_ACTION='sync')
+            env.pop('COMPOSE_PROJECT_NAME', None)
+            config = json.loads(subprocess.check_output(
+                ['docker', 'compose', '-f', str(ROOT / 'docker_env/docker-compose.yml'),
+                 'config', '--format', 'json'], env=env, text=True))
+            service = config['services']['lineage-builder']
+            self.assertEqual(service['platform'], 'linux/amd64')
+            self.assertEqual(service['command'], ['sync'])
+            self.assertEqual(config['name'], 'lineage-' + profile)
+            source = next(v for v in service['volumes'] if v['target'] == '/android/lineage')
+            self.assertEqual(source['type'], 'volume')
+            volumes.append(config['volumes'][source['source']]['name'])
+            for volume in service['volumes']:
+                if volume['type'] == 'bind':
+                    self.assertIn('/docker_source/' + profile + '/', volume['source'])
+        self.assertEqual(len(set(volumes)), 2)
+
+    def test_mac_launcher_defaults_to_sync_and_two_workers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            shutil.copy2(ROOT / 'bootstrap_docker.sh', base)
+            bin_dir = base / 'bin'
+            bin_dir.mkdir()
+            uname = bin_dir / 'uname'
+            uname.write_text('#!/bin/sh\nif [ "$1" = -s ]; then echo Darwin; else echo arm64; fi\n')
+            uname.chmod(0o755)
+            docker = bin_dir / 'docker'
+            docker.write_text('#!/bin/sh\nprintf "%s %s %s %s\\n" "$*" "$BUILD_ACTION" "$BUILD_PROFILE" "$SYNC_JOBS" >> "$TRACE"\n')
+            docker.chmod(0o755)
+            env = dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH'], TRACE=str(base / 'trace'))
+            for key in ('BUILD_ACTION', 'SYNC_JOBS', 'BUILD_PROFILE'):
+                env.pop(key, None)
+            result = subprocess.run(['bash', str(base / 'bootstrap_docker.sh'), '--profile', 'realme6'],
+                                    env=env, text=True, capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Apple Silicon', result.stdout)
+            trace = (base / 'trace').read_text()
+            self.assertIn('sync realme6 2', trace)
+            self.assertTrue((base / 'docker_source/realme6/logs').is_dir())
+            self.assertFalse((base / 'docker_source/realme6/lineage').exists())
+
 class FilesystemTests(unittest.TestCase):
     def test_probe_cleans_up_and_preserves_existing_files(self):
         checker = load_script('check_filesystem')

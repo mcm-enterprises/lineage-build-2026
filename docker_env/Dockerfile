@@ -13,7 +13,9 @@ ARG HOST_UID=1000
 ARG HOST_GID=1000
 RUN test "$HOST_UID" -ne 0 \
     && (getent group "$HOST_GID" || groupadd -g "$HOST_GID" builder) \
-    && useradd -u "$HOST_UID" -g "$HOST_GID" -m -s /bin/bash builder
+    && useradd -u "$HOST_UID" -g "$HOST_GID" -m -s /bin/bash builder \
+    && mkdir -p /android/lineage \
+    && chown "$HOST_UID:$HOST_GID" /android/lineage
 COPY build-lineage.sh /opt/lineage-build/build-lineage.sh
 COPY profiles/ /opt/lineage-build/profiles/
 COPY scripts/ /opt/lineage-build/scripts/

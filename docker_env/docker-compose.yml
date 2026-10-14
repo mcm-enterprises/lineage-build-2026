@@ -1,6 +1,8 @@
 name: lineage-${BUILD_PROFILE:-pixel}
 services:
   lineage-builder:
+    platform: linux/amd64
+    command: ["${BUILD_ACTION:-all}"]
     build:
       context: ..
       dockerfile: docker_env/Dockerfile
@@ -17,7 +19,9 @@ services:
       SYNC_RETRIES: ${SYNC_RETRIES:-3}
       MIN_FREE_GB: ${MIN_FREE_GB:-300}
     volumes:
-      - ../docker_source/${BUILD_PROFILE:-pixel}/lineage:/android/lineage
+      - source:/android/lineage
       - ../docker_source/${BUILD_PROFILE:-pixel}/zips:/android/zips
       - ../docker_source/${BUILD_PROFILE:-pixel}/logs:/android/logs
     stop_grace_period: 2m
+volumes:
+  source:

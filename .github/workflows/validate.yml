@@ -42,3 +42,14 @@ jobs:
               test "$(git -C .repo/manifests config --get branch.default.merge)" = "refs/heads/$TEST_BRANCH"
             '
           done
+      - name: Verify named volume ownership with a macOS-style UID/GID
+        run: |
+          docker build --build-arg HOST_UID=501 --build-arg HOST_GID=20 -f docker_env/Dockerfile -t lineage-build-mac-user .
+          docker run --rm --mount type=volume,src=mac-user-source-test,dst=/android/lineage --entrypoint bash lineage-build-mac-user -c '
+            set -e
+            test "$(id -u)" = 501
+            test "$(id -g)" = 20
+            touch /android/lineage/ownership-check
+            python3 /opt/lineage-build/scripts/check_filesystem.py /android/lineage
+          '
+          docker volume rm mac-user-source-test

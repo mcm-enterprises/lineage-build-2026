@@ -71,7 +71,7 @@ cpu_jobs=$(nproc)
 if (( memory_jobs < cpu_jobs )); then cpu_jobs=$memory_jobs; fi
 JOBS=${JOBS:-$cpu_jobs}
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || fail "JOBS must be a positive integer."
-if (( mem_kb < 32 * 1024 * 1024 )); then echo "WARNING: Less than 32 GiB RAM available. Soong may require additional RAM/swap even with JOBS=$JOBS."; fi
+if [[ "$ACTION" == build || "$ACTION" == all ]] && (( mem_kb < 32 * 1024 * 1024 )); then echo "WARNING: Less than 32 GiB RAM available. Soong may require additional RAM/swap even with JOBS=$JOBS."; fi
 echo "Profile=$PROFILE Device=$DEVICE Branch=$BRANCH Build=$BUILD_DIR Jobs=$JOBS SyncJobs=$SYNC_JOBS"
 echo "Log: $LOG_FILE"
 # Refuse old manifests rather than silently mixing or discarding a user's tree.

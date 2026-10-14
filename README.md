@@ -15,7 +15,8 @@ so firmware and regional variant compatibility need checking before installation
 
 ## Docker (recommended)
 
-Install Docker Engine and Compose v2 on x86_64 Linux. Run as your regular user:
+Use Docker Engine and Compose v2 on Linux, or Docker Desktop on macOS.
+The container uses `linux/amd64` for the Android toolchain. Run as your regular user:
 
 ```bash
 # Build the Pixel reference
@@ -28,9 +29,14 @@ BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
 Each profile has a separate Compose project (`lineage-pixel`, `lineage-realme6`),
-source mount, logs and output directory under `docker_source/<profile>/`.
+Linux named source volume (`lineage-<profile>_source`), plus logs and output
+directories under `docker_source/<profile>/`. Sources are kept inside Docker,
+not on the macOS shared filesystem.
 The image is shared between profiles for the same host UID/GID. The launcher keeps
-your selected Docker context and creates host-owned mounts before starting Docker.
+your selected Docker context and creates host-owned log/output mounts before starting Docker.
+On macOS the launcher defaults to sync only with two workers; use `--action build`
+after sync completes if the machine has sufficient resources. On Linux it defaults
+to `all`. Explicit `--action` selects a stage on either platform.
 See [Docker instructions](README_DOCKER.md) for stages, stopping and exit status.
 
 Budget at least **300 GiB free disk per fresh tree**, preferably on an SSD with a
@@ -102,9 +108,9 @@ mount factory images, patch blobs by basename, fake the date or change host AppA
 
 Old or extra local manifests are rejected without being deleted. Back them up outside
 `.repo/local_manifests`, then remove them from that directory, or use a fresh tree.
-Previously built Pixel trees can be reused with an explicit `BUILD_DIR`; if their
-husky manifest matches, the next sync adds the profile marker. Old Docker directories
-are not automatically moved; back up/move the matching tree to the new profile path.
+Previously built native Pixel trees can be reused with an explicit `BUILD_DIR`; if their
+husky manifest matches, the next sync adds the profile marker. Old Docker bind-mounted source directories are preserved and are not automatically
+copied into named volumes. See the migration instructions in README_DOCKER.md.
 
 ## Outputs and troubleshooting
 

@@ -52,3 +52,13 @@ attempt, prints error lines and retries serially after the first failure. Partia
 downloads remain reusable. `check-network` skips the fresh-tree disk budget so
 connectivity can be diagnosed on a small machine. CI tests actual repo init for
 both bases as well as remote availability; full repo sync remains untested.
+
+## Docker Desktop on macOS / M4 with 16 GB RAM
+
+Sources now live in separate Linux named volumes rather than macOS bind mounts.
+The image seeds source-directory ownership for the host's numeric UID/GID; CI tests
+a macOS-style 501:20 user and an actual named-volume filesystem probe. Compose fixes
+the platform to linux/amd64 for the Android prebuilts. macOS launches default to
+sync with two workers; explicit actions allow staged network checks and builds.
+Docker Desktop VM disk/RAM allocations are distinct from host capacity. Apple
+Silicon emulation and full ROM compilation on 16 GB physical RAM remain unverified.
