@@ -4,15 +4,15 @@ import re
 import sys
 from pathlib import Path
 
-def check(root):
+def check(root, vendor_path="vendor/google/husky", makefile_name="husky-vendor.mk"):
     root = Path(root)
-    vendor = root / "vendor/google/husky"
-    makefile = vendor / "husky-vendor.mk"
+    vendor = root / vendor_path
+    makefile = vendor / makefile_name
     blueprint = vendor / "Android.bp"
     if not makefile.is_file() or not blueprint.is_file():
-        raise ValueError("Missing husky vendor build files. Run sync with the matching local manifest.")
-    references = set(re.findall(r"vendor/google/husky/proprietary/[^\s:]+", makefile.read_text()))
-    references.update("vendor/google/husky/" + path for path in re.findall(
+        raise ValueError("Missing selected profile vendor build files. Run sync with the matching local manifest.")
+    references = set(re.findall(re.escape(vendor_path) + r"/proprietary/[^\s:]+", makefile.read_text()))
+    references.update(vendor_path + "/" + path for path in re.findall(
         r'"(proprietary/[^"*]+)"', blueprint.read_text()
     ))
     missing = sorted(path for path in references if not (root / path).exists())
@@ -27,12 +27,12 @@ def check(root):
         errors.append("Missing vendor sources (first 10): " + ", ".join(missing[:10]))
     if pointers:
         errors.append("Undownloaded Git LFS blobs (first 10): " + ", ".join(pointers[:10]) +
-                      ". Run git -C vendor/google/husky lfs pull in the source tree.")
+                      f". Run git -C {vendor_path} lfs pull in the source tree.")
     if errors:
         raise ValueError("\n".join(errors))
 
 if __name__ == "__main__":
     try:
-        check(sys.argv[1])
+        check(*sys.argv[1:])
     except (ValueError, OSError) as error:
         sys.exit(str(error))

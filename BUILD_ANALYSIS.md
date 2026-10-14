@@ -30,3 +30,25 @@ swap, an unreachable shell HTTP proxy, and an inaccessible Docker daemon socket.
 Consequently neither the Ubuntu image build nor a full source sync/Android compilation
 was run here. CI adds an actual Docker image build and tool smoke check. A full compile
 and device boot test remain necessary before treating any generated image as usable.
+
+## Separate Pixel reference and Realme 6 builds
+
+The workflow now selects `pixel` (husky / lineage-22.1) or `realme6`
+(RMX2001L1 / lineage-21.0). Profile configuration controls target, manifest and
+vendor layout. Native sources/logs/outputs and Docker projects/volumes are isolated;
+a source profile marker rejects reuse across devices. Manifest validation accepts
+only the exact selected profile manifest. Artifact matching checks the target
+suffix so a ZIP from another device cannot be reported as the selected build.
+
+Realme dependencies were inspected and pinned from the community lineage-21 source
+set, including device/common configuration, kernel defconfig, vendor build files,
+MediaTek hardware and policy. See REALME6.md for revisions and firmware limitations.
+Offline tests verify both targets and default path isolation; CI validates both
+Compose configurations and Docker entry points. Neither full Android compilation
+nor Realme phone testing has been completed in this environment.
+
+Sync now probes small remote refs before the large download, saves one log per
+attempt, prints error lines and retries serially after the first failure. Partial
+downloads remain reusable. `check-network` skips the fresh-tree disk budget so
+connectivity can be diagnosed on a small machine. CI tests actual repo init for
+both bases as well as remote availability; full repo sync remains untested.

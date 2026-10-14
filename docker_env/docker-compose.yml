@@ -1,3 +1,4 @@
+name: lineage-${BUILD_PROFILE:-pixel}
 services:
   lineage-builder:
     build:
@@ -6,17 +7,17 @@ services:
       args:
         HOST_UID: ${HOST_UID:-1000}
         HOST_GID: ${HOST_GID:-1000}
-    image: lineage-builder:22.1
+    image: lineage-builder:ubuntu22.04-${HOST_UID:-1000}-${HOST_GID:-1000}
     init: true
     restart: "no"
     environment:
-      BRANCH: lineage-22.1
+      BUILD_PROFILE: ${BUILD_PROFILE:-pixel}
       JOBS: ${JOBS:-}
       SYNC_JOBS: ${SYNC_JOBS:-4}
       SYNC_RETRIES: ${SYNC_RETRIES:-3}
       MIN_FREE_GB: ${MIN_FREE_GB:-300}
     volumes:
-      - ../docker_source/lineage:/android/lineage
-      - ../docker_source/zips:/android/zips
-      - ../docker_source/logs:/android/logs
+      - ../docker_source/${BUILD_PROFILE:-pixel}/lineage:/android/lineage
+      - ../docker_source/${BUILD_PROFILE:-pixel}/zips:/android/zips
+      - ../docker_source/${BUILD_PROFILE:-pixel}/logs:/android/logs
     stop_grace_period: 2m

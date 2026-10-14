@@ -15,6 +15,7 @@ RUN test "$HOST_UID" -ne 0 \
     && (getent group "$HOST_GID" || groupadd -g "$HOST_GID" builder) \
     && useradd -u "$HOST_UID" -g "$HOST_GID" -m -s /bin/bash builder
 COPY build-lineage.sh /opt/lineage-build/build-lineage.sh
+COPY profiles/ /opt/lineage-build/profiles/
 COPY scripts/ /opt/lineage-build/scripts/
 COPY local_manifests/ /opt/lineage-build/local_manifests/
 COPY docker_env/src/entrypoint.sh /usr/local/bin/entrypoint.sh

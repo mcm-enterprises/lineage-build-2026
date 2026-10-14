@@ -1,27 +1,42 @@
-# LineageOS 22.1 for Pixel 8 Pro (husky)
+# LineageOS builds: Pixel reference and Realme 6
 
-This repository automates source synchronization and an unofficial `userdebug` build.
-The supported combination is **husky + lineage-22.1 (Android 15)**. This is a historical
-release, not a claim that 22.1 has current security patches. Other releases need a
-separately verified manifest and their own source directory.
+Choose a build profile. The repository supports assembling both configurations;
+full Android compilation and phone boot tests have not been completed here.
 
-Use Ubuntu 22.04 x86_64, or the Ubuntu 22.04 Docker image on another Linux host.
-Plan for at least **300 GiB free disk**, preferably on an SSD with a Linux filesystem,
-and **32 GiB RAM or more**. Soong can need substantially more memory; low parallelism
-alone does not guarantee it will fit. Use swap if needed. Avoid FAT/exFAT source drives.
+| Profile | Phone / build target | Android base | Status |
+| --- | --- | --- | --- |
+| `pixel` | Pixel 8 Pro / `husky` | LineageOS 22.1 / Android 15 | Reference configuration |
+| `realme6` | Realme 6 RMX2001 / `RMX2001L1` | LineageOS 21.0 / Android 14 | Community configuration; compile/boot verification pending |
 
-## Recommended: Docker
+These are historical releases, not a claim of current security patch coverage.
+The Realme target name comes from its community device sources; RMX2001 is the
+phone's model number. Vendor fingerprints in that source set reference RMX2002,
+so firmware and regional variant compatibility need checking before installation.
 
-Install Docker Engine and Compose v2, then run from your regular account:
+## Docker (recommended)
+
+Install Docker Engine and Compose v2 on x86_64 Linux. Run as your regular user:
 
 ```bash
-./bootstrap_docker.sh
-docker compose -f docker_env/docker-compose.yml logs -f
+# Build the Pixel reference
+./bootstrap_docker.sh --profile pixel
+BUILD_PROFILE=pixel docker compose -f docker_env/docker-compose.yml logs -f
+
+# Build the Realme 6
+./bootstrap_docker.sh --profile realme6
+BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
-The launcher creates host-owned directories and builds the container user with your
-UID/GID. It respects your selected Docker context. See [Docker instructions](README_DOCKER.md)
-for checking exit status, stopping, and resuming.
+Each profile has a separate Compose project (`lineage-pixel`, `lineage-realme6`),
+source mount, logs and output directory under `docker_source/<profile>/`.
+The image is shared between profiles for the same host UID/GID. The launcher keeps
+your selected Docker context and creates host-owned mounts before starting Docker.
+See [Docker instructions](README_DOCKER.md) for stages, stopping and exit status.
+
+Budget at least **300 GiB free disk per fresh tree**, preferably on an SSD with a
+Linux filesystem, and **32 GiB RAM or more**. Soong may need additional RAM/swap.
+Build one profile at a time unless the host has resources for both. Each invocation
+sizes its own jobs; it does not divide available RAM between simultaneous builds.
 
 ## Native Ubuntu 22.04
 
@@ -29,81 +44,87 @@ for checking exit status, stopping, and resuming.
 ./setup_build_env.sh
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
-./build-lineage.sh check
-./build-lineage.sh all
+
+./build-lineage.sh --profile pixel check
+./build-lineage.sh --profile pixel all
+./build-lineage.sh --profile realme6 check
+./build-lineage.sh --profile realme6 all
 ```
 
-`check` checks tools, identity, disk budget and conflicting local manifests; it does
-not test remote connectivity or download Android sources. `sync` only initializes
-and synchronizes sources. `build` uses the existing tree and does not run the full
-sync step. `all` performs both. Each invocation writes its own log in `logs/`.
+The default is `pixel`, so existing `./build-lineage.sh all` commands still work.
+You can also set `BUILD_PROFILE=realme6`. The command-line profile takes precedence.
+`check` validates tools, Git identity, disk budget, profile markers, manifests and filesystem features (case sensitivity, symlinks, execution);
+it does not test remote connectivity or download Android sources. `check-network` probes small manifest/device remote refs without the 300 GiB disk requirement. `sync`
+checks those refs, then initializes/synchronizes sources. `build` compiles a populated tree. `all` does both.
 
-To use an existing source drive or reduce parallelism:
+| Native data | Default path |
+| --- | --- |
+| Sources | `android_source/<profile>/<branch>/` |
+| Artifacts | `zips/<profile>/<branch>/` |
+| Logs | `logs/<profile>/<branch>/` |
+
+Overrides: `BUILD_DIR`, `OUTPUT_DIR`, `LOG_DIR`, `JOBS`, `SYNC_JOBS` (default 4),
+`SYNC_RETRIES` (default 3) and `MIN_FREE_GB` (default 300). For example:
 
 ```bash
-BUILD_DIR=/media/BIG_STORAGE/lineageOS/android_source/LINEAGE_22_1 \
-  JOBS=4 SYNC_JOBS=4 ./build-lineage.sh all
+BUILD_DIR=/media/BIG_STORAGE/lineageOS/realme6/lineage-21.0 \
+  JOBS=4 ./build-lineage.sh --profile realme6 all
 ```
 
-Run in the foreground first so errors are visible. For a background build, create
-the redirect directory **before** starting (shell redirection runs before the script):
+For a populated tree, set `MIN_FREE_GB` to its remaining-space budget. Build jobs
+default to the smaller of CPU count or one per 4 GiB RAM, respecting cgroup v2 limits.
+The build runs without ccache. Do not share override directories between profiles.
+A persistent profile marker, branch check and exact local manifest check reject
+attempts to mix source trees. Unknown profiles or branch overrides are rejected.
+
+Run in the foreground first. To background a build, create the redirect directory
+before starting it:
 
 ```bash
 mkdir -p logs
-nohup ./build-lineage.sh all > logs/launcher.log 2>&1 &
-echo $! > logs/launcher.pid
-tail -f logs/launcher.log
+nohup ./build-lineage.sh --profile realme6 all > logs/realme6-launcher.log 2>&1 &
+tail -f logs/realme6-launcher.log
 ```
 
-Defaults: source `android_source/LINEAGE_22_1`, artifacts `zips/`, logs `logs/`, sync
-parallelism 4, sync retries 3. Build jobs default to the smaller of CPU count or one
-job per 4 GiB RAM (including the cgroup v2 limit). Override `JOBS`, `SYNC_JOBS`,
-`SYNC_RETRIES`, `OUTPUT_DIR`, `LOG_DIR`, or `MIN_FREE_GB` as needed. For a populated
-tree, set `MIN_FREE_GB` to your remaining-space budget rather than the fresh-tree 300 GiB.
-The build runs without ccache by default.
+## Source configuration
 
-## Source and vendor handling
+`profiles/*.conf` define the target, base branch and vendor layout.
+`local_manifests/husky.xml` selects shusky and its shared Google dependencies,
+the upstream 5.15 kernel and matching TheMuppets husky vendor project.
+`local_manifests/realme6.xml` pins verified community `lineage-21` snapshots for
+RMX2001L1, RM6785-common, kernel, vendor, MediaTek hardware and SELinux policy.
+Community branch names differ from the Android base's `lineage-21.0` name.
+See [Realme source details](REALME6.md) for upstream links and firmware limitations.
 
-`local_manifests/husky.xml` uses the shared `device/google/shusky` tree, its zuma,
-gs101 and gs-common dependencies, and the upstream shusky 5.15 kernel remote.
-Only the matching TheMuppets husky vendor repository is needed for this device.
-`repo init --git-lfs` runs before installing the local manifest. Missing vendor
-copy sources and LFS pointer files are checked before compiling.
+Initialization runs before local-manifest installation. Vendor build files, copy
+sources and Git LFS downloads are checked before compilation. The scripts do not
+mount factory images, patch blobs by basename, fake the date or change host AppArmor.
 
-The script never patches blobs by searching for filenames, fakes the build date,
-or changes host AppArmor settings. These workarounds can hide the actual mismatch.
-If you choose to extract blobs yourself, use the branch's
-`device/google/shusky/husky/extract-files.py` and matching firmware from the
-[LineageOS device guide](https://wiki.lineageos.org/devices/husky/build/), rather than
-copying similarly named files from an arbitrary factory image.
+Old or extra local manifests are rejected without being deleted. Back them up outside
+`.repo/local_manifests`, then remove them from that directory, or use a fresh tree.
+Previously built Pixel trees can be reused with an explicit `BUILD_DIR`; if their
+husky manifest matches, the next sync adds the profile marker. Old Docker directories
+are not automatically moved; back up/move the matching tree to the new profile path.
 
-Existing `muppets.xml`, the old `husky.xml`, or another Google local manifest may
-conflict. The script stops and identifies the file: back it up outside
-`.repo/local_manifests`, then remove it from that directory or use a fresh BUILD_DIR.
-A tree initialized on another branch is rejected. Your source tree is never deleted.
+## Outputs and troubleshooting
 
-## Outputs and diagnosing failures
+Success requires a new or updated ZIP ending in the selected device name. ZIPs,
+available boot images, `SHA256SUMS` and `source-manifest.xml` are copied into that
+profile's output folder; artifacts also stay in the source tree. Verify with
+`sha256sum -c SHA256SUMS` in the output folder. This repository does not flash phones.
 
-Success requires a new or updated `lineage-*.zip`, which is copied to `zips/` alongside
-available boot images, `SHA256SUMS`, and a revision-pinned `source-manifest.xml`.
-Artifacts remain in the source tree too. Verify with `sha256sum -c SHA256SUMS` in the
-output directory. Installation requires the device-specific LineageOS instructions;
-this repository does not flash your phone.
+- **Sync failure:** inspect the first failed project and fix network/disk/authentication
+  errors, then rerun `sync`. Partial downloads and locks are preserved; no force-sync. Retries use one worker
+  after the first failure and write separate `*-attempt-*.log` files.
+- **Missing vendor sources:** rerun sync. For LFS pointers, run `git lfs pull` inside
+  the selected vendor directory shown in the error.
+- **Killed / exit 137:** inspect kernel logs for OOM, add RAM/swap and reduce JOBS.
+- **Sandbox failure:** diagnose the host policy or use the supported Docker environment.
+- **Concurrent build:** stop the workflow using that tree. Its file lock does not
+  prevent separately invoked repo/build commands, so do not run those alongside it.
 
-- **Sync failure:** read the first failed project in the log, fix network/disk/authentication
-  errors and rerun `sync`. Retries preserve partial downloads. No locks are deleted and
-  `--force-sync` is not used.
-- **Missing vendor files/LFS pointers:** rerun sync; for pointers, run
-  `git -C "$BUILD_DIR/vendor/google/husky" lfs pull` with BUILD_DIR set to your source tree.
-- **Killed / exit 137:** inspect host kernel logs for an OOM kill, add RAM/swap and reduce JOBS.
-- **Sandbox/user namespace error:** prefer the supported Ubuntu/Docker environment and
-  diagnose the specific host policy instead of globally disabling security controls.
-- **Concurrent build:** stop the workflow using that source tree before restarting.
-  A file lock prevents two copies of this script from running against one tree; avoid
-  separately running repo or builds in that tree while the workflow is active.
-
-The old scripts in `archive/` are retained for reference and are not supported entry points.
-Do not use broad `pkill -f python/repo` commands or delete the entire tree to fix a sync error.
+Scripts in `archive/` are unsupported historical references. Avoid broad `pkill`
+commands or deleting a source tree as a routine sync recovery step.
 
 ## Validation
 
@@ -111,10 +132,12 @@ Do not use broad `pkill -f python/repo` commands or delete the entire tree to fi
 python3 -m unittest discover -s tests -v
 bash -n build-lineage.sh bootstrap_docker.sh setup_build_env.sh docker_env/src/entrypoint.sh
 docker compose -f docker_env/docker-compose.yml config --quiet
+BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml config --quiet
 ```
 
-Offline integration tests use mocked Android tools to cover startup order, retries,
-locking, branch/manifest conflicts, vendor validation, error propagation and artifact
-export. They do not prove that a complete Android image compiles or boots. CI also
-builds the Docker image and checks its tools; a full build needs a suitably sized host.
-See [analysis and changes](BUILD_ANALYSIS.md) for the original failure findings.
+Offline tests exercise both profiles with mocked Android tools, including isolation,
+startup order, retries, locking, vendor checks, failure handling and ZIP export.
+CI also builds the Docker image, probes remote refs, smoke-tests both profile entry
+points and runs actual repo init for both Android branches. These
+checks do not establish that either ROM compiles completely or boots on a phone.
+See [original build analysis](BUILD_ANALYSIS.md) for the initial failure findings.

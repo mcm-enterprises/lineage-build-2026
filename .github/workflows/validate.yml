@@ -14,11 +14,31 @@ jobs:
         run: |
           bash -n build-lineage.sh bootstrap_docker.sh setup_build_env.sh docker_env/src/entrypoint.sh
           python3 -m unittest discover -s tests -v
-          python3 -c "import xml.etree.ElementTree as ET; ET.parse('local_manifests/husky.xml')"
+          python3 -c "from pathlib import Path; import xml.etree.ElementTree as ET; [ET.parse(p) for p in Path('local_manifests').glob('*.xml')]"
           docker compose -f docker_env/docker-compose.yml config --quiet
+          BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml config --quiet
       - name: Build supported Ubuntu environment
         run: docker build -f docker_env/Dockerfile -t lineage-build-smoke .
       - name: Check container tools and user
         run: |
           docker run --rm --entrypoint bash lineage-build-smoke -c 'test "$(id -u)" -ne 0 && repo --version && git lfs version && command -v rsync flock python3'
-          docker run --rm lineage-build-smoke --help
+          docker run --rm lineage-build-smoke --profile pixel --help
+          docker run --rm lineage-build-smoke --profile realme6 --help
+      - name: Verify remote refs for both profiles
+        run: |
+          for profile in pixel realme6; do
+            docker run --rm -e BUILD_PROFILE="$profile" -e BUILD_DIR=/tmp/source -e OUTPUT_DIR=/tmp/zips -e LOG_DIR=/tmp/logs lineage-build-smoke check-network
+          done
+      - name: Initialize real Android manifests without full source sync
+        run: |
+          for branch in lineage-22.1 lineage-21.0; do
+            docker run --rm --entrypoint bash -e TEST_BRANCH="$branch" lineage-build-smoke -c '
+              set -e
+              git config --global user.name "CI Builder"
+              git config --global user.email "ci@localhost"
+              mkdir -p /tmp/manifest-check
+              cd /tmp/manifest-check
+              repo init -u https://github.com/LineageOS/android.git -b "$TEST_BRANCH" --git-lfs --no-clone-bundle
+              test "$(git -C .repo/manifests config --get branch.default.merge)" = "refs/heads/$TEST_BRANCH"
+            '
+          done

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <!-- Community lineage-21 snapshots verified 2026-10-14; Android base is lineage-21.0. -->
+  <remote name="realme-community" fetch="https://github.com/realme-mt6785-devs" />
+  <project name="android_device_realme_RMX2001L1" path="device/realme/RMX2001L1" remote="realme-community" upstream="lineage-21" revision="e409983a594e7ed13295682c0e8077a5db343702" />
+  <project name="android_device_realme_RM6785-common" path="device/realme/RM6785-common" remote="realme-community" upstream="lineage-21" revision="1877f586573c3bf9e05e8e0123224c4326a43541" />
+  <project name="android_kernel_realme_mt6785" path="kernel/realme/mt6785" remote="realme-community" upstream="lineage-21" revision="1c7f84704726fc608340abd1647adc4d837b19c6" />
+  <project name="proprietary_vendor_realme_RM6785-common" path="vendor/realme/RM6785-common" remote="realme-community" upstream="lineage-21" revision="3259c12a0542ccbcd1701e1f8b47980ea0846f35" />
+  <project name="android_hardware_mediatek-old" path="hardware/mediatek" remote="realme-community" upstream="lineage-21" revision="d4f2080e8761d92c76706c2512e67eda91bf7c80" />
+  <project name="android_device_mediatek_sepolicy_vndr-old" path="device/mediatek/sepolicy_vndr" remote="realme-community" upstream="lineage-21" revision="b2e91057424be1cc8e87aee1dadc9ffd80bdf330" />
+</manifest>
+
