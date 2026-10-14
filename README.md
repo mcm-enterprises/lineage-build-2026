@@ -1,67 +1,170 @@
 # LineageOS builds: Pixel reference and Realme 6
 
-Choose a build profile. The repository supports assembling both configurations;
-full Android compilation and phone boot tests have not been completed here.
+Build automation for two separate devices:
 
-| Profile | Phone / build target | Android base | Status |
-| --- | --- | --- | --- |
-| `pixel` | Pixel 8 Pro / `husky` | LineageOS 22.1 / Android 15 | Reference configuration |
-| `realme6` | Realme 6 RMX2001 / `RMX2001L1` | LineageOS 21.0 / Android 14 | Community configuration; compile/boot verification pending |
+| Profile | Phone / build target | Android base |
+| --- | --- | --- |
+| `pixel` | Pixel 8 Pro / `husky` | LineageOS 22.1 / Android 15 |
+| `realme6` | Realme 6 RMX2001 / `RMX2001L1` | LineageOS 21.0 / Android 14 |
 
-These are historical releases, not a claim of current security patch coverage.
-The Realme target name comes from its community device sources; RMX2001 is the
-phone's model number. Vendor fingerprints in that source set reference RMX2002,
-so firmware and regional variant compatibility need checking before installation.
+**Status:** the automation and Docker setup pass CI. Remote access and actual
+`repo init` have been verified for both profiles. Full Android source sync, ROM
+compilation, Apple Silicon execution and phone boot tests remain unverified.
+These are historical Android releases; current security patch coverage is not claimed.
 
-## Docker (recommended)
+The Realme profile uses community sources. Its target name is `RMX2001L1`; the phone
+model is RMX2001. Its vendor fingerprints reference RMX2002, so firmware and regional
+compatibility need checking before installation. See [Realme source details](REALME6.md).
 
-Use Docker Engine and Compose v2 on Linux, or Docker Desktop on macOS.
-The container uses `linux/amd64` for the Android toolchain. Run as your regular user:
+## Get the updated workflow
+
+While [PR #1](https://github.com/mcm-enterprises/lineage-build-2026/pull/1) is unmerged,
+use its branch. For a fresh checkout:
 
 ```bash
-# Build the Pixel reference
-./bootstrap_docker.sh --profile pixel
-BUILD_PROFILE=pixel docker compose -f docker_env/docker-compose.yml logs -f
+git clone --branch codex/fix-husky-build-workflow https://github.com/mcm-enterprises/lineage-build-2026.git
+cd lineage-build-2026
+```
 
-# Build the Realme 6
-./bootstrap_docker.sh --profile realme6
+If you already have a checkout, fetch and switch to that branch after preserving
+any local changes. The original `main` does not yet contain this workflow.
+
+## Start here: Docker Desktop on your M4 Mac mini
+
+Ubuntu remains the build environment. Docker uses `linux/amd64`, so your M4 runs
+these tools through emulation. A macOS container would not replace the Linux
+Android toolchain.
+
+Your 16 GB Mac can attempt source sync and a conservative build. More RAM makes
+compilation easier, but buying a 64 GB machine is not a prerequisite to trying.
+Full builds may be slow or run out of memory, even with one build job.
+
+Before starting, open **Docker Desktop → Settings → Resources**:
+
+- Allocate about **8–10 GB RAM**, leaving memory for macOS.
+- Increase Docker's **disk image capacity** so there is at least **300 GiB free
+  inside Docker** for a fresh source tree. Host free space and Docker capacity differ.
+  Allow additional capacity if keeping both profiles.
+- Allow several GB of swap if your Desktop configuration offers it.
+- Enable the supported amd64/Rosetta option if available for your VM backend.
+
+These settings are not changed by the scripts. Run one profile at a time.
+Detailed storage and migration guidance is in [Docker instructions](README_DOCKER.md).
+
+### 1. Check connectivity
+
+From the repository root, with Docker Desktop running:
+
+```bash
+./bootstrap_docker.sh --profile realme6 --action check-network
 BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
-Each profile has a separate Compose project (`lineage-pixel`, `lineage-realme6`),
-Linux named source volume (`lineage-<profile>_source`), plus logs and output
-directories under `docker_source/<profile>/`. Sources are kept inside Docker,
-not on the macOS shared filesystem.
-The image is shared between profiles for the same host UID/GID. The launcher keeps
-your selected Docker context and creates host-owned log/output mounts before starting Docker.
-On macOS the launcher defaults to sync only with two workers; use `--action build`
-after sync completes if the machine has sufficient resources. On Linux it defaults
-to `all`. Explicit `--action` selects a stage on either platform.
-See [Docker instructions](README_DOCKER.md) for stages, stopping and exit status.
+This builds the Ubuntu image, checks the source filesystem and probes small remote
+refs. It does not download the full Android tree and skips the fresh-tree disk budget.
+Press Ctrl+C to leave the log viewer; that does not stop the container.
 
-Budget at least **300 GiB free disk per fresh tree**, preferably on an SSD with a
-Linux filesystem, and **32 GiB RAM or more**. Soong may need additional RAM/swap.
-Build one profile at a time unless the host has resources for both. Each invocation
-sizes its own jobs; it does not divide available RAM between simultaneous builds.
+### 2. Sync sources
 
-## Native Ubuntu 22.04
+After the check finishes successfully:
+
+```bash
+./bootstrap_docker.sh --profile realme6 --action sync
+BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
+```
+
+Downloads persist in a Linux named volume. Partial downloads survive failed attempts.
+The Mac launcher uses two sync workers; after a failure, retries use one worker.
+The first sync is a large download; your connection speed alone does not determine
+how quickly thousands of Git repositories fetch and check out.
+
+### 3. Confirm the stage finished
+
+```bash
+container_id=$(BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml ps -aq lineage-builder)
+docker inspect --format 'running={{.State.Running}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' "$container_id"
+```
+
+Wait for `running=false`. Then `exit=0` means that stage succeeded. Successful sync
+means sources are ready for a build attempt; it does not mean a ROM has compiled.
+A detached launch message alone does not mean success.
+
+### 4. Attempt a one-job build
+
+Once sync has succeeded:
+
+```bash
+JOBS=1 ./bootstrap_docker.sh --profile realme6 --action build
+BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
+```
+
+The `build` stage uses the downloaded tree. Check its final exit status as above.
+If it succeeds, ZIPs and checksums appear in `docker_source/realme6/zips/`.
+If the populated tree has less than the default 300 GiB remaining, set `MIN_FREE_GB`
+to an appropriate remaining-space budget; that check is conservative, not a measured
+requirement for every incremental build.
+
+For the Pixel reference, repeat these stages with `--profile pixel` and
+`BUILD_PROFILE=pixel`. Its artifacts are in `docker_source/pixel/zips/`.
+Do not run both profiles together on the 16 GB Mac.
+
+## Actions and defaults
+
+| Action | What it does |
+| --- | --- |
+| `check` | Tools, Git identity, filesystem, disk budget and source-profile checks |
+| `check-network` | The same preparation plus small remote-ref probes; skips the 300 GiB budget |
+| `sync` | Remote probes, repo initialization and source synchronization |
+| `build` | Vendor checks, compilation and artifact export from an existing tree |
+| `all` | Sync, then build |
+
+The Docker launcher defaults to **sync on macOS** and **all on Linux**. Use explicit
+`--action` arguments to make your intent clear. Native `build-lineage.sh` defaults
+to `all`. The default profile is `pixel`; `--profile` overrides `BUILD_PROFILE`.
+Stop an active container before changing its action.
+
+Profiles have separate Compose projects, source volumes, logs and output folders.
+A source profile marker, branch check and exact local-manifest check reject mixed trees.
+Unknown profiles and mismatched branch overrides are rejected.
+
+## Logs, stopping and recovery
+
+Docker logs are also saved under `docker_source/<profile>/logs/`, including a log
+for each sync attempt. To stop the Realme workflow:
+
+```bash
+BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml stop
+```
+
+Rerun the same launcher/action to resume. Source volumes persist. Avoid
+`docker compose down -v`: it deletes the downloaded source volume. The scripts
+never delete a source tree, remove Git locks or force-sync as an automatic recovery.
+
+- **Sync failure:** inspect the first failed project in the attempt log, resolve
+  its network/disk/permission error and rerun `sync`.
+- **Killed / exit 137:** often memory pressure, but also possible after a forced stop.
+  `oom=true` confirms a container OOM kill. `oom=false` does not rule out a compiler
+  process being killed inside Docker's VM. Check the surrounding log and Desktop
+  memory usage; reduce JOBS and use available swap.
+- **Missing vendor files / LFS pointers:** rerun sync. If instructed, run `git lfs pull`
+  inside the selected vendor checkout in the container, not the host repository.
+- **Filesystem check failure:** inspect mount permissions/noexec and use the Linux
+  named source volume. Do not use a case-insensitive macOS folder for Android sources.
+- **Profile/manifest conflict:** preserve the old tree or manifest, then use the
+  matching profile or a separate source directory. Do not combine branches/devices.
+
+## Native Ubuntu 22.04 alternative
+
+Run natively on x86_64 Ubuntu 22.04, not directly in macOS Terminal:
 
 ```bash
 ./setup_build_env.sh
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
-
-./build-lineage.sh --profile pixel check
-./build-lineage.sh --profile pixel all
-./build-lineage.sh --profile realme6 check
-./build-lineage.sh --profile realme6 all
+./build-lineage.sh --profile realme6 check-network
+./build-lineage.sh --profile realme6 sync
+JOBS=1 ./build-lineage.sh --profile realme6 build
 ```
-
-The default is `pixel`, so existing `./build-lineage.sh all` commands still work.
-You can also set `BUILD_PROFILE=realme6`. The command-line profile takes precedence.
-`check` validates tools, Git identity, disk budget, profile markers, manifests and filesystem features (case sensitivity, symlinks, execution);
-it does not test remote connectivity or download Android sources. `check-network` probes small manifest/device remote refs without the 300 GiB disk requirement. `sync`
-checks those refs, then initializes/synchronizes sources. `build` compiles a populated tree. `all` does both.
 
 | Native data | Default path |
 | --- | --- |
@@ -69,70 +172,35 @@ checks those refs, then initializes/synchronizes sources. `build` compiles a pop
 | Artifacts | `zips/<profile>/<branch>/` |
 | Logs | `logs/<profile>/<branch>/` |
 
-Overrides: `BUILD_DIR`, `OUTPUT_DIR`, `LOG_DIR`, `JOBS`, `SYNC_JOBS` (default 4),
-`SYNC_RETRIES` (default 3) and `MIN_FREE_GB` (default 300). For example:
+Overrides: `BUILD_DIR`, `OUTPUT_DIR`, `LOG_DIR`, `JOBS`, `SYNC_JOBS`, `SYNC_RETRIES`
+(default 3) and `MIN_FREE_GB` (default 300). Build jobs normally use the smaller of
+CPU count or one per 4 GiB RAM, respecting cgroup v2 limits. Ccache is disabled.
+Do not share override directories between profiles. More RAM, such as 32 GiB or more,
+is recommended for compilation, not enforced as a hard prerequisite.
 
-```bash
-BUILD_DIR=/media/BIG_STORAGE/lineageOS/realme6/lineage-21.0 \
-  JOBS=4 ./build-lineage.sh --profile realme6 all
-```
+## Source configuration and outputs
 
-For a populated tree, set `MIN_FREE_GB` to its remaining-space budget. Build jobs
-default to the smaller of CPU count or one per 4 GiB RAM, respecting cgroup v2 limits.
-The build runs without ccache. Do not share override directories between profiles.
-A persistent profile marker, branch check and exact local manifest check reject
-attempts to mix source trees. Unknown profiles or branch overrides are rejected.
+`profiles/*.conf` select targets, branches and vendor layouts. The Pixel manifest
+uses shusky, its Google dependencies and TheMuppets husky blobs. The Realme manifest
+pins community device/common/kernel/vendor/MediaTek dependencies. See
+[Realme revisions](REALME6.md) and [build analysis](BUILD_ANALYSIS.md).
 
-Run in the foreground first. To background a build, create the redirect directory
-before starting it:
+Build success requires a new or updated ZIP ending in the selected device name.
+Available boot images, `SHA256SUMS` and a pinned `source-manifest.xml` are exported
+alongside the ZIP. Verify with `sha256sum -c SHA256SUMS` in the output directory.
+These scripts do not flash a phone. A successful compile still needs device testing.
 
-```bash
-mkdir -p logs
-nohup ./build-lineage.sh --profile realme6 all > logs/realme6-launcher.log 2>&1 &
-tail -f logs/realme6-launcher.log
-```
-
-## Source configuration
-
-`profiles/*.conf` define the target, base branch and vendor layout.
-`local_manifests/husky.xml` selects shusky and its shared Google dependencies,
-the upstream 5.15 kernel and matching TheMuppets husky vendor project.
-`local_manifests/realme6.xml` pins verified community `lineage-21` snapshots for
-RMX2001L1, RM6785-common, kernel, vendor, MediaTek hardware and SELinux policy.
-Community branch names differ from the Android base's `lineage-21.0` name.
-See [Realme source details](REALME6.md) for upstream links and firmware limitations.
-
-Initialization runs before local-manifest installation. Vendor build files, copy
-sources and Git LFS downloads are checked before compilation. The scripts do not
-mount factory images, patch blobs by basename, fake the date or change host AppArmor.
-
-Old or extra local manifests are rejected without being deleted. Back them up outside
-`.repo/local_manifests`, then remove them from that directory, or use a fresh tree.
-Previously built native Pixel trees can be reused with an explicit `BUILD_DIR`; if their
-husky manifest matches, the next sync adds the profile marker. Old Docker bind-mounted source directories are preserved and are not automatically
-copied into named volumes. See the migration instructions in README_DOCKER.md.
-
-## Outputs and troubleshooting
-
-Success requires a new or updated ZIP ending in the selected device name. ZIPs,
-available boot images, `SHA256SUMS` and `source-manifest.xml` are copied into that
-profile's output folder; artifacts also stay in the source tree. Verify with
-`sha256sum -c SHA256SUMS` in the output folder. This repository does not flash phones.
-
-- **Sync failure:** inspect the first failed project and fix network/disk/authentication
-  errors, then rerun `sync`. Partial downloads and locks are preserved; no force-sync. Retries use one worker
-  after the first failure and write separate `*-attempt-*.log` files.
-- **Missing vendor sources:** rerun sync. For LFS pointers, run `git lfs pull` inside
-  the selected vendor directory shown in the error.
-- **Killed / exit 137:** inspect kernel logs for OOM, add RAM/swap and reduce JOBS.
-- **Sandbox failure:** diagnose the host policy or use the supported Docker environment.
-- **Concurrent build:** stop the workflow using that tree. Its file lock does not
-  prevent separately invoked repo/build commands, so do not run those alongside it.
-
-Scripts in `archive/` are unsupported historical references. Avoid broad `pkill`
-commands or deleting a source tree as a routine sync recovery step.
+Old scripts in `archive/` are unsupported references. Existing native trees may be
+reused with a matching explicit BUILD_DIR. Old Docker bind-mounted source trees
+remain untouched; [migration instructions](README_DOCKER.md#reusing-earlier-downloads)
+explain how to copy a compatible tree into a new named volume.
 
 ## Validation
+
+CI passes 22 tests, Docker image builds, both profile entry points, real remote-ref
+probes, actual repo init for both branches, and named-volume ownership with UID/GID
+501:20. CI runs on x86_64 Linux; it does not test your M4 or a full Android build.
+To run the local checks:
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -140,10 +208,3 @@ bash -n build-lineage.sh bootstrap_docker.sh setup_build_env.sh docker_env/src/e
 docker compose -f docker_env/docker-compose.yml config --quiet
 BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml config --quiet
 ```
-
-Offline tests exercise both profiles with mocked Android tools, including isolation,
-startup order, retries, locking, vendor checks, failure handling and ZIP export.
-CI also builds the Docker image, probes remote refs, smoke-tests both profile entry
-points and runs actual repo init for both Android branches. These
-checks do not establish that either ROM compiles completely or boots on a phone.
-See [original build analysis](BUILD_ANALYSIS.md) for the initial failure findings.

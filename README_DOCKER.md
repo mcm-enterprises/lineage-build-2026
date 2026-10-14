@@ -20,6 +20,9 @@ Start with source sync, not compilation. In Docker Desktop Settings → Resource
 - Use Docker Desktop's supported amd64/Rosetta emulation option if available for
   the selected VM backend. This repository does not change your Desktop settings.
 
+For the step-by-step connectivity → sync → one-job build workflow, start with
+[README](README.md#start-here-docker-desktop-on-your-m4-mac-mini).
+
 The Mac launcher defaults to `sync` and two workers. It reports Docker's architecture
 and assigned memory. This is intentionally independent from your 900 Mbps connection.
 
@@ -39,7 +42,8 @@ On Linux, the default action is `all`. `--action check`, `check-network`, `sync`
 `build` or `all` overrides the default on either platform. Run one at a time unless
 you have enough resources for both. Stop an active build before changing its action.
 For example, `JOBS=1 ./bootstrap_docker.sh --profile realme6 --action build` uses
-previously synchronized sources, but compilation is **not verified on Apple Silicon**.
+previously synchronized sources. This can be attempted on your existing 16 GB
+Mac; a RAM upgrade is not required to try. Compilation is **not verified on Apple Silicon**.
 
 ## Storage and ownership
 
@@ -69,10 +73,11 @@ export HOST_UID=$(id -u) HOST_GID=$(id -g)
 docker compose -f docker_env/docker-compose.yml logs -f
 docker compose -f docker_env/docker-compose.yml ps -a
 container_id=$(docker compose -f docker_env/docker-compose.yml ps -aq lineage-builder)
-docker inspect --format '{{.State.ExitCode}}' "$container_id"
+docker inspect --format 'running={{.State.Running}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' "$container_id"
 ```
 
-A detached launch only means the container started. A sync exit code zero means
+Wait until `running=false` before interpreting the final exit code. A detached
+launch only means the container started. A sync exit code zero means
 sources synchronized; it does not imply a compiled ZIP. Build success also requires
 new artifacts matching the selected target. Full image/phone validation is separate.
 
