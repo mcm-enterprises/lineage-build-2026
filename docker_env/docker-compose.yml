@@ -1,36 +1,27 @@
-version: '3.8'
-
+name: lineage-${BUILD_PROFILE:-pixel}
 services:
   lineage-builder:
-    build: .
-    image: lineage-builder:latest
-    container_name: lineage-builder-husky
+    platform: linux/amd64
+    command: ["${BUILD_ACTION:-all}"]
+    build:
+      context: ..
+      dockerfile: docker_env/Dockerfile
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    image: lineage-builder:ubuntu22.04-${HOST_UID:-1000}-${HOST_GID:-1000}
+    init: true
     restart: "no"
-
-    # Environment Configuration
     environment:
-      - DEVICE=husky
-      - BRANCH=lineage-23.0
-      - USE_CCACHE=1
-      - CCACHE_SIZE=50G
-
-    # Volumes (Persist Data)
+      BUILD_PROFILE: ${BUILD_PROFILE:-pixel}
+      JOBS: ${JOBS:-}
+      SYNC_JOBS: ${SYNC_JOBS:-4}
+      SYNC_RETRIES: ${SYNC_RETRIES:-3}
+      MIN_FREE_GB: ${MIN_FREE_GB:-300}
     volumes:
-      # Source Code (The 150GB monster)
-      - ../docker_source/lineage:/android/lineage
-
-      # Output Zips
-      - ../docker_source/zips:/android/zips
-
-      # Cache (Speed up rebuilds)
-      - ../docker_source/ccache:/srv/ccache
-
-    # Resource Limits (Prevents freezing your PC)
-    deploy:
-      resources:
-        limits:
-          memory: 24G
-
-    # Networking
-    # Host networking is slightly faster for thousands of connections
-    network_mode: "host"
+      - source:/android/lineage
+      - ../docker_source/${BUILD_PROFILE:-pixel}/zips:/android/zips
+      - ../docker_source/${BUILD_PROFILE:-pixel}/logs:/android/logs
+    stop_grace_period: 2m
+volumes:
+  source:
