@@ -1,6 +1,9 @@
 """Offline integration tests: exercise workflow order and failures using tiny tool stubs."""
 import importlib.util
 import os
+import json
+import zipfile
+from unittest import mock
 import shutil
 from pathlib import Path
 import subprocess
@@ -62,7 +65,7 @@ m() {
     [[ "${TEST_BUILD_FAIL:-0}" == 0 ]] || return 9
     [[ "${TEST_NO_ZIP:-0}" == 0 ]] || return 0
     mkdir -p out/target/product/$DEVICE
-    printf 'test zip\n' > out/target/product/$DEVICE/lineage-test-$DEVICE.zip
+    python3 -c 'import sys, zipfile; archive=zipfile.ZipFile(sys.argv[1], "w"); archive.writestr("META-INF/com/android/metadata", "pre-device=" + sys.argv[2]); archive.writestr("payload.bin", b"test payload"); archive.close()' "out/target/product/$DEVICE/lineage-test-$DEVICE.zip" "${TEST_OTA_DEVICE:-$DEVICE}"
     printf 'test boot\n' > out/target/product/$DEVICE/boot.img
 }
 ENVSETUP
@@ -98,7 +101,7 @@ for path in sys.argv[2:-1]:
         self.assertTrue(lines[0].startswith('init '))
         self.assertTrue(lines[1].startswith('sync '))
         self.assertIn('m bacon -j2', lines)
-        self.assertEqual((self.base / 'zips/lineage-test-husky.zip').read_text(), 'test zip\n')
+        self.assertTrue(zipfile.is_zipfile(self.base / 'zips/lineage-test-husky.zip'))
         self.assertTrue((self.base / 'zips/boot.img').exists())
         self.assertTrue((self.base / 'zips/source-manifest.xml').exists())
         subprocess.run(['sha256sum', '-c', 'SHA256SUMS'], cwd=self.base / 'zips', check=True,
@@ -179,6 +182,43 @@ for path in sys.argv[2:-1]:
         self.assertNotIn('breakfast', self.trace())
         self.assertTrue(lock.exists())
 
+    def test_failed_sync_invalidates_previous_completion(self):
+        self.assertEqual(self.run_workflow('sync').returncode, 0)
+        self.assertEqual(json.loads((self.source / '.lineage-sync.json').read_text())['status'], 'complete')
+        self.assertNotEqual(self.run_workflow('sync', TEST_SYNC_FAIL='1', SYNC_RETRIES='1').returncode, 0)
+        result = self.run_workflow('build')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Last sync is incomplete', result.stdout)
+        self.assertNotIn('m bacon', self.trace())
+        self.assertEqual(self.run_workflow('sync').returncode, 0)
+        resumed = self.run_workflow('build')
+        self.assertEqual(resumed.returncode, 0, resumed.stdout)
+
+    def test_build_rejects_missing_sync_checkpoint(self):
+        self.assertEqual(self.run_workflow('sync').returncode, 0)
+        (self.source / '.lineage-sync.json').unlink()
+        result = self.run_workflow('build')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('No valid completed-sync checkpoint', result.stdout)
+
+    def test_wrong_ota_metadata_is_not_exported(self):
+        result = self.run_workflow(TEST_OTA_DEVICE='wrong-phone')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('OTA metadata targets', result.stdout)
+        self.assertFalse((self.base / 'zips/lineage-test-husky.zip').exists())
+
+    def test_compile_failure_saves_stage_and_memory_report(self):
+        result = self.run_workflow(TEST_BUILD_FAIL='1')
+        self.assertNotEqual(result.returncode, 0)
+        reports = list((self.base / 'logs').glob('*.json'))
+        self.assertEqual(len(reports), 1)
+        report = json.loads(reports[0].read_text())
+        self.assertEqual(report['last_stage'], 'compile')
+        self.assertEqual(report['exit_code'], 9)
+        self.assertIn('memory', report['before'])
+        self.assertIn('memory_diagnosis', report)
+        self.assertNotIn('environment', report)
+
     def test_build_and_breakfast_failures_propagate(self):
         for failure in ({'TEST_BUILD_FAIL': '1'}, {'TEST_BREAKFAST_EXIT': '8'}):
             with self.subTest(failure=failure):
@@ -230,6 +270,48 @@ for path in sys.argv[2:-1]:
         result = self.run_workflow('build')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Run sync first', result.stdout)
+
+class IntegrityTests(unittest.TestCase):
+    def test_missing_metadata_and_corrupt_zip_are_rejected(self):
+        checker = load_script('check_ota')
+        with tempfile.TemporaryDirectory() as directory:
+            ota = Path(directory) / 'ota.zip'
+            with zipfile.ZipFile(ota, 'w') as archive:
+                archive.writestr('payload.bin', 'payload')
+            with self.assertRaisesRegex(ValueError, 'missing Android metadata'):
+                checker.check(ota, 'husky')
+            ota.write_bytes(b'broken zip')
+            with self.assertRaises(ValueError):
+                checker.check(ota, 'husky')
+
+    def test_sync_manifest_change_requires_resync(self):
+        checker = load_script('sync_state')
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'manifest.xml'
+            state = Path(directory) / 'state.json'
+            manifest.write_text('<manifest/>')
+            checker.write(state, 'complete', 'pixel', 'lineage-22.1', manifest)
+            checker.check(state, 'pixel', 'lineage-22.1', manifest)
+            manifest.write_text('<manifest><project name="new"/></manifest>')
+            with self.assertRaisesRegex(ValueError, 'different manifest'):
+                checker.check(state, 'pixel', 'lineage-22.1', manifest)
+
+    def test_memory_report_records_counter_increase_without_guessing(self):
+        reporter = load_script('run_report')
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / 'report.json'
+            before = dict(memory={}, cgroup={}, oom_counters={'oom_kill': 2})
+            after = dict(memory={}, cgroup={}, oom_counters={'oom_kill': 3})
+            with mock.patch.object(reporter, 'resources', return_value=before):
+                reporter.start(report, 'pixel', 'build', directory)
+            with mock.patch.object(reporter, 'resources', return_value=after):
+                reporter.finish(report, '137', 'compile', '1', '2')
+            data = json.loads(report.read_text())
+            self.assertEqual(data['oom_counter_increases']['oom_kill'], 1)
+            self.assertIn('counter increased', data['memory_diagnosis'])
+            with mock.patch.object(reporter, 'resources', return_value=before):
+                reporter.finish(report, '137', 'compile', '1', '2')
+            self.assertIn('possible OOM or forced stop', json.loads(report.read_text())['memory_diagnosis'])
 
 class VendorTests(unittest.TestCase):
     def test_missing_copy_source_and_lfs_pointer(self):
@@ -294,19 +376,35 @@ class DockerConfigurationTests(unittest.TestCase):
             uname.write_text('#!/bin/sh\nif [ "$1" = -s ]; then echo Darwin; else echo arm64; fi\n')
             uname.chmod(0o755)
             docker = bin_dir / 'docker'
-            docker.write_text('#!/bin/sh\nprintf "%s %s %s %s\\n" "$*" "$BUILD_ACTION" "$BUILD_PROFILE" "$SYNC_JOBS" >> "$TRACE"\n')
+            docker.write_text('#!/bin/sh\nprintf "%s %s %s %s %s\\n" "$*" "$BUILD_ACTION" "$BUILD_PROFILE" "$SYNC_JOBS" "$JOBS" >> "$TRACE"\n')
             docker.chmod(0o755)
             env = dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH'], TRACE=str(base / 'trace'))
-            for key in ('BUILD_ACTION', 'SYNC_JOBS', 'BUILD_PROFILE'):
+            for key in ('BUILD_ACTION', 'SYNC_JOBS', 'BUILD_PROFILE', 'JOBS'):
                 env.pop(key, None)
             result = subprocess.run(['bash', str(base / 'bootstrap_docker.sh'), '--profile', 'realme6'],
                                     env=env, text=True, capture_output=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('Apple Silicon', result.stdout)
             trace = (base / 'trace').read_text()
-            self.assertIn('sync realme6 2', trace)
+            self.assertIn('sync realme6 2 1', trace)
             self.assertTrue((base / 'docker_source/realme6/logs').is_dir())
             self.assertFalse((base / 'docker_source/realme6/lineage').exists())
+
+    def test_launcher_does_not_replace_an_active_workflow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            shutil.copy2(ROOT / 'bootstrap_docker.sh', base)
+            bin_dir = base / 'bin'
+            bin_dir.mkdir()
+            docker = bin_dir / 'docker'
+            docker.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACE\"\ncase \"$*\" in *'ps --status running'*) echo active-container ;; esac\n")
+            docker.chmod(0o755)
+            env = dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH'], TRACE=str(base / 'trace'))
+            result = subprocess.run(['bash', str(base / 'bootstrap_docker.sh'), '--profile', 'realme6'],
+                                    env=env, text=True, capture_output=True, timeout=20)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('already has a running workflow', result.stderr)
+            self.assertNotIn('up -d', (base / 'trace').read_text())
 
 class FilesystemTests(unittest.TestCase):
     def test_probe_cleans_up_and_preserves_existing_files(self):

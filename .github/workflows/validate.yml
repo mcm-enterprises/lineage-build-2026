@@ -29,10 +29,11 @@ jobs:
           for profile in pixel realme6; do
             docker run --rm -e BUILD_PROFILE="$profile" -e BUILD_DIR=/tmp/source -e OUTPUT_DIR=/tmp/zips -e LOG_DIR=/tmp/logs lineage-build-smoke check-network
           done
-      - name: Initialize real Android manifests without full source sync
+      - name: Initialize manifests and check out selected real Android/device sources
         run: |
-          for branch in lineage-22.1 lineage-21.0; do
-            docker run --rm --entrypoint bash -e TEST_BRANCH="$branch" lineage-build-smoke -c '
+          for profile in pixel realme6; do
+            if [ "$profile" = pixel ]; then branch=lineage-22.1; else branch=lineage-21.0; fi
+            docker run --rm --entrypoint bash -e TEST_BRANCH="$branch" -e TEST_PROFILE="$profile" lineage-build-smoke -c '
               set -e
               git config --global user.name "CI Builder"
               git config --global user.email "ci@localhost"
@@ -40,6 +41,21 @@ jobs:
               cd /tmp/manifest-check
               repo init -u https://github.com/LineageOS/android.git -b "$TEST_BRANCH" --git-lfs --no-clone-bundle
               test "$(git -C .repo/manifests config --get branch.default.merge)" = "refs/heads/$TEST_BRANCH"
+              mkdir -p .repo/local_manifests
+              if [ "$TEST_PROFILE" = pixel ]; then
+                cp /opt/lineage-build/local_manifests/husky.xml .repo/local_manifests/
+                projects="build/make device/google/shusky device/google/zuma device/google/gs101 device/google/gs-common"
+              else
+                cp /opt/lineage-build/local_manifests/realme6.xml .repo/local_manifests/
+                projects="build/make device/realme/RMX2001L1 device/realme/RM6785-common hardware/mediatek device/mediatek/sepolicy_vndr"
+              fi
+              repo sync -c -j2 --optimized-fetch --no-clone-bundle --no-tags --fail-fast $projects
+              test -f build/envsetup.sh
+              if [ "$TEST_PROFILE" = realme6 ]; then
+                test -f device/realme/RMX2001L1/lineage_RMX2001L1.mk
+                test -f device/realme/RM6785-common/BoardConfigCommon.mk
+                test -f device/mediatek/sepolicy_vndr/SEPolicy.mk
+              fi
             '
           done
       - name: Verify named volume ownership with a macOS-style UID/GID

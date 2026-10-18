@@ -62,3 +62,23 @@ the platform to linux/amd64 for the Android prebuilts. macOS launches default to
 sync with two workers; explicit actions allow staged network checks and builds.
 Docker Desktop VM disk/RAM allocations are distinct from host capacity. Apple
 Silicon emulation and full ROM compilation on 16 GB physical RAM remain unverified.
+
+## Additional reliability checks (October 17, 2026)
+
+Compilation now requires an atomically written completed-sync checkpoint tied to
+profile, Android branch and local-manifest SHA-256. An interrupted/failed sync
+cannot silently leave a tree eligible for compilation. Successful syncs also save
+a pinned source manifest. Existing trees need one incremental successful sync.
+
+Each run writes a bounded JSON report containing stage/exit status, RAM/swap/free
+disk and observed cgroup OOM-counter changes. A missing final snapshot can indicate
+an abrupt container termination; Docker OOMKilled is still useful. Reports do not
+collect process environments or credentials and do not label exit 137 alone as
+proof of OOM. macOS launcher compilation defaults to one job, and an active profile
+cannot be replaced implicitly by another launcher invocation.
+
+Artifact validation checks OTA pre-device metadata and ZIP CRCs before export.
+CI now checks out build/make and selected actual device/hardware/policy projects
+for both profiles using the same repo sync options, rather than only initializing
+manifest repositories. It still does not fetch all Android projects, kernel/vendor
+blobs, compile a ROM, execute on Apple Silicon or test a phone.

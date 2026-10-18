@@ -23,7 +23,7 @@ Start with source sync, not compilation. In Docker Desktop Settings → Resource
 For the step-by-step connectivity → sync → one-job build workflow, start with
 [README](README.md#start-here-docker-desktop-on-your-m4-mac-mini).
 
-The Mac launcher defaults to `sync` and two workers. It reports Docker's architecture
+The Mac launcher defaults to `sync`, two sync workers and one compile job. It reports Docker's architecture
 and assigned memory. This is intentionally independent from your 900 Mbps connection.
 
 ```bash
@@ -117,3 +117,21 @@ Only migrate into a new/empty volume, and allow space/time for the copy. This
 explicit operation preserves the old tree, uses a read-only old mount and changes
 ownership only in the selected source volume. Do not combine branches or devices;
 a 23.0 tree cannot become a 22.1 tree by copying it. See [README](README.md).
+
+## Completion and diagnostics
+
+A full successful sync saves `.lineage-sync.json` and a pinned source manifest inside
+the source volume. Compilation requires a completed checkpoint for the current
+profile/manifest. A failed sync invalidates it; rerun sync to resume preserved
+downloads. Older source volumes need one successful sync with the updated script.
+
+Each logged run saves a matching JSON report in `docker_source/<profile>/logs/`.
+It includes stage, exit code, RAM/swap availability, free disk and observed cgroup
+OOM-counter changes. Exit 137 is reported as possible OOM or forced stop unless
+there is stronger counter evidence. A whole-container kill can prevent the final
+report update; inspect Docker's `OOMKilled` field as well. No environment variables
+or credential values are collected in these reports.
+
+A successful build additionally verifies ZIP CRC integrity and Android OTA device
+metadata before exporting artifacts. These checks do not replace phone testing.
+The launcher refuses to replace an active container; stop it explicitly first.

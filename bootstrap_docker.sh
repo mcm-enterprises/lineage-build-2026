@@ -5,6 +5,7 @@ PROFILE=${BUILD_PROFILE:-pixel}
 if [[ $(uname -s) == Darwin ]]; then
     ACTION=${BUILD_ACTION:-sync}
     export SYNC_JOBS=${SYNC_JOBS:-2}
+    export JOBS=${JOBS:-1}
 else
     ACTION=${BUILD_ACTION:-all}
 fi
@@ -43,6 +44,8 @@ if [[ -d "$SCRIPT_DIR/docker_source/$PROFILE/lineage/.repo" ]]; then
     echo "Previous bind-mounted source tree is preserved in docker_source/$PROFILE/lineage. The new named volume is separate; see README_DOCKER.md before redownloading."
 fi
 docker compose -f "$SCRIPT_DIR/docker_env/docker-compose.yml" config --quiet
+running=$(docker compose -f "$SCRIPT_DIR/docker_env/docker-compose.yml" ps --status running -q lineage-builder)
+[[ -z "$running" ]] || { echo "This profile already has a running workflow. Monitor it or stop it explicitly before launching again." >&2; exit 1; }
 docker compose -f "$SCRIPT_DIR/docker_env/docker-compose.yml" up -d --build
 echo "Monitor: BUILD_PROFILE=$PROFILE docker compose -f $SCRIPT_DIR/docker_env/docker-compose.yml logs -f"
 echo "Stop: BUILD_PROFILE=$PROFILE docker compose -f $SCRIPT_DIR/docker_env/docker-compose.yml stop"

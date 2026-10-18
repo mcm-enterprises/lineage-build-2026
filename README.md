@@ -8,7 +8,8 @@ Build automation for two separate devices:
 | `realme6` | Realme 6 RMX2001 / `RMX2001L1` | LineageOS 21.0 / Android 14 |
 
 **Status:** the automation and Docker setup pass CI. Remote access and actual
-`repo init` have been verified for both profiles. Full Android source sync, ROM
+`repo init` have been verified for both profiles. CI also exercises selected source
+checkouts; this is smaller than a full source sync. Full Android source sync, ROM
 compilation, Apple Silicon execution and phone boot tests remain unverified.
 These are historical Android releases; current security patch coverage is not claimed.
 
@@ -74,7 +75,7 @@ BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
 Downloads persist in a Linux named volume. Partial downloads survive failed attempts.
-The Mac launcher uses two sync workers; after a failure, retries use one worker.
+The Mac launcher uses two sync workers and defaults to one compile job; after a failure, retries use one worker.
 The first sync is a large download; your connection speed alone does not determine
 how quickly thousands of Git repositories fetch and check out.
 
@@ -98,7 +99,9 @@ JOBS=1 ./bootstrap_docker.sh --profile realme6 --action build
 BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
-The `build` stage uses the downloaded tree. Check its final exit status as above.
+The `build` stage requires a completed-sync checkpoint matching the profile and
+manifest. A failed or interrupted sync must be rerun successfully before compilation.
+Existing downloads are reused. The stage then uses the downloaded tree. Check its final exit status as above.
 If it succeeds, ZIPs and checksums appear in `docker_source/realme6/zips/`.
 If the populated tree has less than the default 300 GiB remaining, set `MIN_FREE_GB`
 to an appropriate remaining-space budget; that check is conservative, not a measured
@@ -121,7 +124,8 @@ Do not run both profiles together on the 16 GB Mac.
 The Docker launcher defaults to **sync on macOS** and **all on Linux**. Use explicit
 `--action` arguments to make your intent clear. Native `build-lineage.sh` defaults
 to `all`. The default profile is `pixel`; `--profile` overrides `BUILD_PROFILE`.
-Stop an active container before changing its action.
+Stop an active container before changing its action. The launcher refuses to
+replace a running workflow, preserving ongoing sync/build work.
 
 Profiles have separate Compose projects, source volumes, logs and output folders.
 A source profile marker, branch check and exact local-manifest check reject mixed trees.
@@ -130,7 +134,9 @@ Unknown profiles and mismatched branch overrides are rejected.
 ## Logs, stopping and recovery
 
 Docker logs are also saved under `docker_source/<profile>/logs/`, including a log
-for each sync attempt. To stop the Realme workflow:
+for each sync attempt. Matching `.json` run reports record the last stage, exit code,
+RAM/swap snapshots and cgroup OOM-counter changes. If the entire container is killed,
+the report may contain only its start snapshot; also check Docker's `OOMKilled` flag. To stop the Realme workflow:
 
 ```bash
 BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml stop
@@ -186,6 +192,8 @@ pins community device/common/kernel/vendor/MediaTek dependencies. See
 [Realme revisions](REALME6.md) and [build analysis](BUILD_ANALYSIS.md).
 
 Build success requires a new or updated ZIP ending in the selected device name.
+Before export, every ZIP is checked for readable Android OTA metadata, the expected
+`pre-device` target and CRC integrity; a matching filename alone is insufficient.
 Available boot images, `SHA256SUMS` and a pinned `source-manifest.xml` are exported
 alongside the ZIP. Verify with `sha256sum -c SHA256SUMS` in the output directory.
 These scripts do not flash a phone. A successful compile still needs device testing.
@@ -197,9 +205,10 @@ explain how to copy a compatible tree into a new named volume.
 
 ## Validation
 
-CI passes 22 tests, Docker image builds, both profile entry points, real remote-ref
-probes, actual repo init for both branches, and named-volume ownership with UID/GID
-501:20. CI runs on x86_64 Linux; it does not test your M4 or a full Android build.
+Automated checks cover Docker image builds, both profile entry points, real remote-ref
+probes, actual repo init plus selected Android/device checkouts for both branches,
+and named-volume ownership with UID/GID 501:20. Tests also cover interrupted-sync
+recovery, OTA validation, active-workflow protection and memory reports. CI runs on x86_64 Linux; it does not test your M4 or a full Android build.
 To run the local checks:
 
 ```bash

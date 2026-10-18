@@ -52,9 +52,19 @@ LOG_DIR=$(cd "$LOG_DIR" && pwd -P)
 # Hold this descriptor through repo and the build; never unlink the lock file.
 exec 9>"$BUILD_DIR/.lineage-build.lock"
 flock -n 9 || fail "Another workflow is using $BUILD_DIR."
-LOG_FILE="$LOG_DIR/${PROFILE}-$(date +%Y%m%d-%H%M%S)-$$.log"
+LOG_FILE="$LOG_DIR/${PROFILE}-$(date +%Y%m%d-%H%M%S-%N)-$$.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'code=$?; echo "ERROR: line $LINENO failed (exit $code). Log: $LOG_FILE" >&2; exit "$code"' ERR
+REPORT_FILE="${LOG_FILE%.log}.json"
+STAGE=preflight
+finish_run() {
+    local code=$?
+    trap - EXIT
+    python3 "$SCRIPT_DIR/scripts/run_report.py" finish "$REPORT_FILE" "$code" "$STAGE" "${JOBS:-auto}" "$SYNC_JOBS" || echo "WARNING: Could not finalize run report." >&2
+    exit "$code"
+}
+python3 "$SCRIPT_DIR/scripts/run_report.py" start "$REPORT_FILE" "$PROFILE" "$ACTION" "$BUILD_DIR"
+trap finish_run EXIT
 cd "$BUILD_DIR"
 python3 "$SCRIPT_DIR/scripts/check_filesystem.py" "$BUILD_DIR"
 free_gb=$(df -Pk . | awk 'NR==2 {print int($4/1024/1024)}')
@@ -85,13 +95,17 @@ if [[ -d .repo/manifests/.git ]]; then
 fi
 if [[ "$ACTION" == check ]]; then echo "Preflight passed. No source downloaded or compilation started."; exit 0; fi
 if [[ "$ACTION" == check-network ]]; then
+    STAGE=remote-checks
     python3 "$SCRIPT_DIR/scripts/check_remotes.py" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME" "$BRANCH"
     exit 0
 fi
 sync_sources() {
     # .repo may exist after a failed init; always run the idempotent init first.
+    STAGE=remote-checks
     echo "Checking manifest and device remote refs before downloading Android sources..."
     python3 "$SCRIPT_DIR/scripts/check_remotes.py" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME" "$BRANCH"
+    STAGE=repo-init
+    python3 "$SCRIPT_DIR/scripts/sync_state.py" write .lineage-sync.json syncing "$PROFILE" "$BRANCH" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME"
     echo "Initializing $BRANCH manifest..."
     repo init -u https://github.com/LineageOS/android.git -b "$BRANCH" --git-lfs --no-clone-bundle
     mkdir -p .repo/local_manifests
@@ -102,12 +116,15 @@ sync_sources() {
     # Detect stalled HTTP transfers while retaining the inherited proxy/CA settings.
     export GIT_HTTP_LOW_SPEED_LIMIT=${GIT_HTTP_LOW_SPEED_LIMIT:-1}
     export GIT_HTTP_LOW_SPEED_TIME=${GIT_HTTP_LOW_SPEED_TIME:-120}
+    STAGE=repo-sync
     for ((attempt=1; attempt<=SYNC_RETRIES; attempt++)); do
         attempt_jobs=$SYNC_JOBS
         if (( attempt > 1 )); then attempt_jobs=1; fi
-        attempt_log="$LOG_DIR/${PROFILE}-sync-$(date +%Y%m%d-%H%M%S)-$$-attempt-$attempt.log"
+        attempt_log="$LOG_DIR/${PROFILE}-sync-$(date +%Y%m%d-%H%M%S-%N)-$$-attempt-$attempt.log"
         echo "Sync attempt $attempt/$SYNC_RETRIES with $attempt_jobs workers; log: $attempt_log"
         if repo sync -c -j"$attempt_jobs" --optimized-fetch --no-clone-bundle --no-tags --fail-fast 2>&1 | tee "$attempt_log"; then
+            repo manifest -r -o .lineage-synced-manifest.xml
+            python3 "$SCRIPT_DIR/scripts/sync_state.py" write .lineage-sync.json complete "$PROFILE" "$BRANCH" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME"
             return 0
         else
             sync_status=("${PIPESTATUS[@]}")
@@ -123,11 +140,15 @@ sync_sources() {
 if [[ "$ACTION" == sync || "$ACTION" == all ]]; then sync_sources; fi
 if [[ "$ACTION" == sync ]]; then echo "Sync complete."; exit 0; fi
 [[ -f build/envsetup.sh ]] || fail "Missing source tree. Run sync first."
+STAGE=sync-checkpoint
+python3 "$SCRIPT_DIR/scripts/sync_state.py" check .lineage-sync.json "$PROFILE" "$BRANCH" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME"
+STAGE=vendor-checks
 python3 "$SCRIPT_DIR/scripts/check_vendor.py" "$BUILD_DIR" "$VENDOR_DIR" "$VENDOR_MAKEFILE"
 # Remove inherited workaround flags; use the toolchain shipped with this branch.
 unset USE_CCACHE CCACHE_DIR CCACHE_EXEC CC_WRAPPER TEMPORARY_DISABLE_PATH_RESTRICTIONS
 unset OVERRIDE_BUILD_DATE BUILD_DATETIME_CHECK
 # Android shell helpers are not compatible with nounset.
+STAGE=build-configuration
 source build/envsetup.sh
 breakfast "$DEVICE" userdebug
 product_dir="${OUT_DIR:-out}/target/product/$DEVICE"
@@ -136,7 +157,9 @@ declare -A previous_zips=()
 for zip in "$product_dir"/lineage-*-"$DEVICE".zip; do
     previous_zips["$zip"]=$(stat -c '%y:%s:%i' "$zip")
 done
+STAGE=compile
 m bacon -j"$JOBS"
+STAGE=artifacts
 fresh_zips=()
 for zip in "$product_dir"/lineage-*-"$DEVICE".zip; do
     if [[ "${previous_zips[$zip]:-}" != "$(stat -c '%y:%s:%i' "$zip")" ]]; then
@@ -144,6 +167,7 @@ for zip in "$product_dir"/lineage-*-"$DEVICE".zip; do
     fi
 done
 [[ ${#fresh_zips[@]} -gt 0 ]] || fail "Build returned success but produced no new lineage ZIP in $product_dir."
+python3 "$SCRIPT_DIR/scripts/check_ota.py" "$DEVICE" "${fresh_zips[@]}"
 rsync -a "${fresh_zips[@]}" "$OUTPUT_DIR/"
 for image in boot.img dtbo.img vendor_boot.img vbmeta.img recovery.img; do
     [[ ! -f "$product_dir/$image" ]] || rsync -a "$product_dir/$image" "$OUTPUT_DIR/"
