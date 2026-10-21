@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
-  <remove-project name="LineageOS/android_device_google_husky" />
-  <remove-project name="LineageOS/android_device_google_shiba" />
-  <remove-project name="LineageOS/android_device_google_zuma" />
-
-  <project name="LineageOS/android_device_google_husky" path="device/google/husky" remote="github" revision="lineage-22.1" />
-  <project name="LineageOS/android_device_google_shiba" path="device/google/shiba" remote="github" revision="lineage-22.1" />
+  <!-- Dependencies verified against LineageOS lineage-22.1 lineage.dependencies. -->
+  <project name="LineageOS/android_device_google_shusky" path="device/google/shusky" remote="github" revision="lineage-22.1" />
   <project name="LineageOS/android_device_google_zuma" path="device/google/zuma" remote="github" revision="lineage-22.1" />
+  <project name="LineageOS/android_device_google_gs101" path="device/google/gs101" remote="github" revision="lineage-22.1" />
+  <project name="LineageOS/android_device_google_gs-common" path="device/google/gs-common" remote="github" revision="lineage-22.1" />
+  <project name="device/google/shusky-kernels/5.15" path="device/google/shusky-kernels/5.15" remote="aosp-shusky" />
+  <remote name="muppets" fetch="https://github.com/TheMuppets" />
+  <project name="proprietary_vendor_google_husky" path="vendor/google/husky" remote="muppets" revision="lineage-22.1" />
 </manifest>

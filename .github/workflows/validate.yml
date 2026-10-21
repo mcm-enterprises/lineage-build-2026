@@ -1,0 +1,71 @@
+name: Validate build automation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax and offline integration tests
+        run: |
+          bash -n build-lineage.sh bootstrap_docker.sh monitor_docker.sh setup_build_env.sh docker_env/src/entrypoint.sh
+          python3 -m unittest discover -s tests -v
+          python3 -c "from pathlib import Path; import xml.etree.ElementTree as ET; [ET.parse(p) for p in Path('local_manifests').glob('*.xml')]"
+          docker compose -f docker_env/docker-compose.yml config --quiet
+          BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml config --quiet
+      - name: Build supported Ubuntu environment
+        run: docker build -f docker_env/Dockerfile -t lineage-build-smoke .
+      - name: Check container tools and user
+        run: |
+          docker run --rm --entrypoint bash lineage-build-smoke -c 'test "$(id -u)" -ne 0 && repo --version && git lfs version && command -v rsync flock python3'
+          docker run --rm lineage-build-smoke --profile pixel --help
+          docker run --rm lineage-build-smoke --profile realme6 --help
+      - name: Verify remote refs for both profiles
+        run: |
+          for profile in pixel realme6; do
+            docker run --rm -e BUILD_PROFILE="$profile" -e BUILD_DIR=/tmp/source -e OUTPUT_DIR=/tmp/zips -e LOG_DIR=/tmp/logs lineage-build-smoke check-network
+          done
+      - name: Initialize manifests and check out selected real Android/device sources
+        run: |
+          for profile in pixel realme6; do
+            if [ "$profile" = pixel ]; then branch=lineage-22.1; else branch=lineage-21.0; fi
+            docker run --rm --entrypoint bash -e TEST_BRANCH="$branch" -e TEST_PROFILE="$profile" lineage-build-smoke -c '
+              set -e
+              git config --global user.name "CI Builder"
+              git config --global user.email "ci@localhost"
+              mkdir -p /tmp/manifest-check
+              cd /tmp/manifest-check
+              repo init -u https://github.com/LineageOS/android.git -b "$TEST_BRANCH" --git-lfs --no-clone-bundle
+              test "$(git -C .repo/manifests config --get branch.default.merge)" = "refs/heads/$TEST_BRANCH"
+              mkdir -p .repo/local_manifests
+              if [ "$TEST_PROFILE" = pixel ]; then
+                cp /opt/lineage-build/local_manifests/husky.xml .repo/local_manifests/
+                projects="build/make device/google/shusky device/google/zuma device/google/gs101 device/google/gs-common"
+              else
+                cp /opt/lineage-build/local_manifests/realme6.xml .repo/local_manifests/
+                projects="build/make device/realme/RMX2001L1 device/realme/RM6785-common hardware/mediatek device/mediatek/sepolicy_vndr"
+              fi
+              repo sync -c -j2 --optimized-fetch --no-clone-bundle --no-tags --fail-fast $projects
+              test -f build/envsetup.sh
+              if [ "$TEST_PROFILE" = realme6 ]; then
+                test -f device/realme/RMX2001L1/lineage_RMX2001L1.mk
+                test -f device/realme/RM6785-common/BoardConfigCommon.mk
+                test -f device/mediatek/sepolicy_vndr/SEPolicy.mk
+              fi
+            '
+          done
+      - name: Verify named volume ownership with a macOS-style UID/GID
+        run: |
+          docker build --build-arg HOST_UID=501 --build-arg HOST_GID=20 -f docker_env/Dockerfile -t lineage-build-mac-user .
+          docker run --rm --mount type=volume,src=mac-user-source-test,dst=/android/lineage --entrypoint bash lineage-build-mac-user -c '
+            set -e
+            test "$(id -u)" = 501
+            test "$(id -g)" = 20
+            touch /android/lineage/ownership-check
+            python3 /opt/lineage-build/scripts/check_filesystem.py /android/lineage
+          '
+          docker volume rm mac-user-source-test
