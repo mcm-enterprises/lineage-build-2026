@@ -2,6 +2,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE=${BUILD_PROFILE:-pixel}
+DETACH=0
 if [[ $(uname -s) == Darwin ]]; then
     ACTION=${BUILD_ACTION:-sync}
     export SYNC_JOBS=${SYNC_JOBS:-2}
@@ -11,11 +12,12 @@ else
 fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --detach) DETACH=1; shift ;;
         --profile|--action)
             [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
             if [[ "$1" == --profile ]]; then PROFILE=$2; else ACTION=$2; fi
             shift 2 ;;
-        -h|--help) echo "Usage: $0 [--profile pixel|realme6] [--action check|check-network|sync|build|all]"; exit 0 ;;
+        -h|--help) echo "Usage: $0 [--profile pixel|realme6] [--action check|check-network|sync|build|all] [--detach]"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -47,5 +49,10 @@ docker compose -f "$SCRIPT_DIR/docker_env/docker-compose.yml" config --quiet
 running=$(docker compose -f "$SCRIPT_DIR/docker_env/docker-compose.yml" ps --status running -q lineage-builder)
 [[ -z "$running" ]] || { echo "This profile already has a running workflow. Monitor it or stop it explicitly before launching again." >&2; exit 1; }
 docker compose -f "$SCRIPT_DIR/docker_env/docker-compose.yml" up -d --build
-echo "Monitor: BUILD_PROFILE=$PROFILE docker compose -f $SCRIPT_DIR/docker_env/docker-compose.yml logs -f"
+echo "Started: profile=$PROFILE action=$ACTION (container startup does not mean workflow success)."
+echo "Host logs: $SCRIPT_DIR/docker_source/$PROFILE/logs"
+echo "Monitor until finished: bash \"$SCRIPT_DIR/monitor_docker.sh\" --profile $PROFILE"
 echo "Stop: BUILD_PROFILE=$PROFILE docker compose -f $SCRIPT_DIR/docker_env/docker-compose.yml stop"
+if [[ "$DETACH" == 0 ]]; then
+    exec bash "$SCRIPT_DIR/monitor_docker.sh" --profile "$PROFILE"
+fi

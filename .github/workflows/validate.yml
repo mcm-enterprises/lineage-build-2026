@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Shell syntax and offline integration tests
         run: |
-          bash -n build-lineage.sh bootstrap_docker.sh setup_build_env.sh docker_env/src/entrypoint.sh
+          bash -n build-lineage.sh bootstrap_docker.sh monitor_docker.sh setup_build_env.sh docker_env/src/entrypoint.sh
           python3 -m unittest discover -s tests -v
           python3 -c "from pathlib import Path; import xml.etree.ElementTree as ET; [ET.parse(p) for p in Path('local_manifests').glob('*.xml')]"
           docker compose -f docker_env/docker-compose.yml config --quiet

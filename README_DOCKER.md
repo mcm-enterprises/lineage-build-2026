@@ -12,9 +12,9 @@ Start with source sync, not compilation. In Docker Desktop Settings → Resource
 - Allocate around **8–10 GB RAM**, leaving memory for macOS. A full ROM build may
   exceed this even at one build job; a larger x86_64 Linux host is preferable for compilation.
 - Set **disk image capacity** high enough for Android sources. Host free space is
-  separate from this limit. Budget 300 GiB free inside Docker per fresh tree;
-  roughly 400 GB capacity for one profile or 700–800 GB for two is a starting point,
-  subject to actual use and available host storage.
+  separate from this limit. The default preflight threshold is 200 GiB free inside Docker. This is a
+  configurable starting budget, not a measured requirement or guarantee that the
+  complete build fits. Usage depends on the source tree and build outputs.
 - If your Docker Desktop configuration exposes swap, allow several GB. Swap may
   help memory spikes, but does not guarantee a successful full ROM build.
 - Use Docker Desktop's supported amd64/Rosetta emulation option if available for
@@ -28,14 +28,12 @@ and assigned memory. This is intentionally independent from your 900 Mbps connec
 
 ```bash
 ./bootstrap_docker.sh --profile realme6 --action sync
-BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
 After the Realme sync succeeds, you can sync the reference separately:
 
 ```bash
 ./bootstrap_docker.sh --profile pixel --action sync
-BUILD_PROFILE=pixel docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
 On Linux, the default action is `all`. `--action check`, `check-network`, `sync`,
@@ -65,12 +63,19 @@ correction; they are not silently chowned or replaced.
 
 ## Monitoring, stages and exit status
 
+The launcher monitors by default and returns the workflow exit code. Use `--detach`
+to launch without monitoring. Reattach with `bash monitor_docker.sh --profile realme6`;
+it also handles containers that have already stopped. Ctrl+C leaves the
+workflow running. Final log lines are repeated to ensure completion output is visible.
+Plain `docker compose logs -f` may remain attached after completion and its exit code
+is not the workflow result.
+
 Select the profile for every Compose command. For Realme:
 
 ```bash
 export BUILD_PROFILE=realme6
 export HOST_UID=$(id -u) HOST_GID=$(id -g)
-docker compose -f docker_env/docker-compose.yml logs -f
+bash monitor_docker.sh --profile realme6
 docker compose -f docker_env/docker-compose.yml ps -a
 container_id=$(docker compose -f docker_env/docker-compose.yml ps -aq lineage-builder)
 docker inspect --format 'running={{.State.Running}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' "$container_id"
@@ -95,7 +100,11 @@ docker compose -f docker_env/docker-compose.yml run --rm lineage-builder sync
 Run the launcher at least once to build the image and create host log/output mounts.
 For manual `docker compose build`, export HOST_UID/HOST_GID and create the profile's
 host zips/logs directories yourself. Existing root-owned bind mounts need correction.
-A populated source tree can use a smaller remaining-space threshold, e.g. MIN_FREE_GB=100.
+Disk preflight defaults to 200 GiB for fresh sync, 20 GiB for a recognized existing
+tree, and 150 GiB for compilation outputs. `MIN_FREE_GB` overrides the selected
+budget; `BUILD_MIN_FREE_GB` changes the default compile budget. Lowering a threshold
+does not reduce actual storage usage. An `all` run checks compilation space again
+after syncing.
 
 ## Reusing earlier downloads
 
@@ -118,7 +127,43 @@ explicit operation preserves the old tree, uses a read-only old mount and change
 ownership only in the selected source volume. Do not combine branches or devices;
 a 23.0 tree cannot become a 22.1 tree by copying it. See [README](README.md).
 
+## Automatic recovery and its limits
+
+The watchdog prints elapsed time, live process count, time without meaningful
+activity, and remaining disk every 30 seconds. It observes the command session's
+CPU/I/O counters rather than assuming silence means a hang. It terminates the
+whole owned process group before retrying, including stuck descendants. No source
+files, Git lock files or downloaded repositories are deleted.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `SYNC_IDLE_SECONDS` | 600 | Stop a sync with no meaningful process activity |
+| `SYNC_MAX_SECONDS` | 43200 | Maximum seconds per sync attempt, even with activity |
+| `SYNC_RETRIES` | 3 | Bounded attempts per sync phase; later sync attempts use one worker |
+| `SYNC_RETRY_DELAY` | 15 | Seconds between attempts |
+| `WATCHDOG_INTERVAL` | 30 | Seconds between heartbeat/resource checks |
+| `DISK_RESERVE_GB` | 5 | Runtime reserve in GiB on source, logs and output filesystems |
+| `BUILD_IDLE_SECONDS` | 1800 | Maximum idle time during compilation |
+| `BUILD_MAX_SECONDS` | 172800 | Maximum seconds for a compile attempt |
+
+Disk exhaustion and log-write errors stop recovery and require intervention.
+Compilation is supervised but is not repeatedly rebuilt on failure. Remote checks
+and initialization have bounded retries and a 30-minute limit per attempt.
+These limits are configurable because emulated toolchains can be slow.
+
+After a host reboot, start Docker Desktop and rerun the same launcher command.
+It reuses the source volume and selects the remaining-space budget automatically.
+The existing workflow lock file is safe to reuse once the old process is gone.
+Automatic host-reboot restart is not enabled: an exhausted retry budget or low-disk
+failure must not turn into an endless container restart loop. Stale Git lock errors
+are reported for inspection rather than automatically deleting locks.
+
 ## Completion and diagnostics
+
+Sync uses `repo sync --verbose` with unbuffered Python output so fetch details
+reach the monitor and attempt logs even without an interactive terminal.
+Changes to logging apply to the next launched workflow; an existing sync keeps
+its original options.
 
 A full successful sync saves `.lineage-sync.json` and a pinned source manifest inside
 the source volume. Compilation requires a completed checkpoint for the current

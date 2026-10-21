@@ -41,6 +41,19 @@ similarly named blobs from another phone or from the Pixel reference output.
 
 ## Commands
 
+Before compilation, `scripts/source_fixes.py` aligns the MediaTek thermal
+service's two `android.frameworks.stats-V1-ndk` references with V2, which the
+LineageOS 21 Pixel stats libraries use. It checks the expected thermal dependency
+layout, Pixel stats version and frozen V2 API before changing the file. The fix
+is idempotent and leaves the thermal HAL's own V1 interface unchanged.
+
+The pinned source manifest describes upstream commits. Local compatibility changes
+are recorded separately in `.lineage-source-fixes.json` and
+`.lineage-source-fixes.patch` inside the source tree. Successful builds export
+these as `source-fixes.json` and `source-fixes.patch` alongside the ROM and source
+manifest so the modified sources can be reproduced. An unexpected dependency
+layout fails before compilation instead of applying a broad version replacement.
+
 ```bash
 ./build-lineage.sh --profile realme6 check
 ./build-lineage.sh --profile realme6 sync

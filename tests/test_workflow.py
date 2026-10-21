@@ -45,9 +45,18 @@ esac
 set -e
 printf '%s\n' "$*" >> "$TRACE"
 case "$1" in
-init) mkdir -p .repo/manifests/.git ;;
+init)
+  mkdir -p .repo/manifests/.git
+  if [[ "${TEST_INIT_FAIL_ONCE:-0}" == 1 && ! -f .test-init-once ]]; then
+    touch .test-init-once
+    exit 6
+  fi ;;
 sync)
   test -d .repo/manifests/.git
+  if [[ "${TEST_SYNC_HANG_ONCE:-0}" == 1 && ! -f .test-hung-once ]]; then
+    touch .test-hung-once
+    exec sleep 60
+  fi
   if [[ "$BUILD_PROFILE" == realme6 ]]; then
     manifest=realme6.xml; vendor=vendor/realme/RM6785-common; makefile=RM6785-common-vendor.mk
   else
@@ -56,12 +65,28 @@ sync)
   test -f ".repo/local_manifests/$manifest"
   if [[ "${TEST_SYNC_FAIL:-0}" == 1 ]]; then exit 7; fi
   mkdir -p build "$vendor/proprietary"
+  if [[ "$BUILD_PROFILE" == realme6 ]]; then
+    mkdir -p hardware/mediatek/aidl/thermal hardware/google/pixel/pixelstats \
+      frameworks/hardware/interfaces/stats/aidl/aidl_api/android.frameworks.stats/2
+    cat > hardware/mediatek/aidl/thermal/Android.bp <<'THERMAL'
+cc_binary {
+  name: "android.hardware.thermal-service.mediatek",
+  static_libs: ["libpixelstats"],
+  shared_libs: ["android.frameworks.stats-V1-ndk", "android.hardware.thermal-V1-ndk"],
+  export_shared_lib_headers: ["android.frameworks.stats-V1-ndk"],
+}
+THERMAL
+    echo '"android.frameworks.stats-V2-ndk"' > hardware/google/pixel/pixelstats/Android.bp
+  fi
   printf '# mock vendor\n' > "$vendor/$makefile"
   printf '// mock vendor\n' > "$vendor/Android.bp"
   cat > build/envsetup.sh <<'ENVSETUP'
 breakfast() { echo "breakfast $*" >> "$TRACE"; return "${TEST_BREAKFAST_EXIT:-0}"; }
 m() {
     echo "m $*" >> "$TRACE"
+    if [[ "$BUILD_PROFILE" == realme6 ]]; then
+        grep -q android.frameworks.stats-V2-ndk hardware/mediatek/aidl/thermal/Android.bp || return 10
+    fi
     [[ "${TEST_BUILD_FAIL:-0}" == 0 ]] || return 9
     [[ "${TEST_NO_ZIP:-0}" == 0 ]] || return 0
     mkdir -p out/target/product/$DEVICE
@@ -70,7 +95,12 @@ m() {
 }
 ENVSETUP
   ;;
-manifest) printf '<manifest/>\n' > "$4" ;;
+manifest)
+  if [[ "${TEST_MANIFEST_FAIL_ONCE:-0}" == 1 && ! -f .test-manifest-once ]]; then
+    touch .test-manifest-once
+    exit 6
+  fi
+  printf '<manifest/>\n' > "$4" ;;
 esac
 ''')
         self.tool('rsync', '''#!/usr/bin/env python3
@@ -114,6 +144,8 @@ for path in sys.argv[2:-1]:
         self.assertIn('breakfast RMX2001L1 userdebug', self.trace())
         self.assertTrue((self.source / '.repo/local_manifests/realme6.xml').exists())
         self.assertTrue((self.base / 'zips/lineage-test-RMX2001L1.zip').exists())
+        self.assertTrue((self.base / 'zips/source-fixes.patch').exists())
+        self.assertTrue((self.base / 'zips/source-fixes.json').exists())
         self.assertFalse((self.base / 'zips/lineage-test-husky.zip').exists())
 
     def test_profile_marker_prevents_reusing_pixel_tree_for_realme(self):
@@ -157,6 +189,49 @@ for path in sys.argv[2:-1]:
     def test_network_check_does_not_need_fresh_tree_disk_budget(self):
         result = self.run_workflow('check-network', MIN_FREE_GB='99999')
         self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Action=check-network', result.stdout)
+        self.assertIn('Network check passed. No Android sources downloaded or compilation started.', result.stdout)
+        self.assertIn('SUCCESS: pixel action=check-network finished (exit 0).', result.stdout)
+        self.assertEqual(self.trace(), '')
+
+    def test_stalled_sync_is_retried_and_existing_files_survive(self):
+        self.source.mkdir()
+        existing = self.source / 'saved-download'
+        existing.write_text('preserve')
+        result = self.run_workflow('sync', TEST_SYNC_HANG_ONCE='1',
+                                   SYNC_IDLE_SECONDS='1', WATCHDOG_INTERVAL='1')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('TIMEOUT', result.stdout)
+        self.assertIn('Sync attempt 2/3 with 1 workers', result.stdout)
+        self.assertEqual(existing.read_text(), 'preserve')
+        self.assertEqual(json.loads((self.source / '.lineage-sync.json').read_text())['status'], 'complete')
+
+    def test_initialization_and_final_manifest_failures_are_retried(self):
+        result = self.run_workflow('sync', TEST_INIT_FAIL_ONCE='1', TEST_MANIFEST_FAIL_ONCE='1')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('repo-init attempt 1/3 failed', result.stdout)
+        self.assertIn('sync-finalize attempt 1/3 failed', result.stdout)
+        self.assertEqual(json.loads((self.source / '.lineage-sync.json').read_text())['status'], 'complete')
+
+    def test_resume_uses_remaining_space_budget_and_build_rechecks_space(self):
+        result = self.run_workflow('sync')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        # A reboot leaves no live flock owner; an old lock file is harmless.
+        self.assertTrue((self.source / '.lineage-build.lock').exists())
+        self.tool('df', "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nmock 999999999 1 31457280 1%% /\\n'\n")
+        result = self.run_workflow('sync', MIN_FREE_GB='')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('20 GiB required for resuming source sync', result.stdout)
+        result = self.run_workflow('all', MIN_FREE_GB='')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('150 GiB required for compilation outputs', result.stdout)
+        self.assertNotIn('m bacon', self.trace())
+
+    def test_fresh_tree_does_not_get_resume_disk_budget(self):
+        self.tool('df', "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nmock 999999999 1 31457280 1%% /\\n'\n")
+        result = self.run_workflow('sync', MIN_FREE_GB='')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('200 GiB required for fresh source sync', result.stdout)
         self.assertEqual(self.trace(), '')
 
     def test_partial_repo_directory_does_not_skip_init(self):
@@ -178,6 +253,7 @@ for path in sys.argv[2:-1]:
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.trace().count('sync -c'), 2)
         self.assertIn('sync -c -j1', self.trace())
+        self.assertIn('--verbose', self.trace())
         self.assertEqual(len(list((self.base / 'logs').glob('*attempt-*.log'))), 2)
         self.assertNotIn('breakfast', self.trace())
         self.assertTrue(lock.exists())
@@ -381,7 +457,7 @@ class DockerConfigurationTests(unittest.TestCase):
             env = dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH'], TRACE=str(base / 'trace'))
             for key in ('BUILD_ACTION', 'SYNC_JOBS', 'BUILD_PROFILE', 'JOBS'):
                 env.pop(key, None)
-            result = subprocess.run(['bash', str(base / 'bootstrap_docker.sh'), '--profile', 'realme6'],
+            result = subprocess.run(['bash', str(base / 'bootstrap_docker.sh'), '--profile', 'realme6', '--detach'],
                                     env=env, text=True, capture_output=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('Apple Silicon', result.stdout)
@@ -389,6 +465,22 @@ class DockerConfigurationTests(unittest.TestCase):
             self.assertIn('sync realme6 2 1', trace)
             self.assertTrue((base / 'docker_source/realme6/logs').is_dir())
             self.assertFalse((base / 'docker_source/realme6/lineage').exists())
+
+    def test_launcher_monitors_by_default_and_returns_workflow_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            shutil.copy2(ROOT / 'bootstrap_docker.sh', base)
+            (base / 'monitor_docker.sh').write_text('echo "monitor $*"; exit 9\n')
+            bin_dir = base / 'bin'
+            bin_dir.mkdir()
+            docker = bin_dir / 'docker'
+            docker.write_text('#!/bin/sh\nexit 0\n')
+            docker.chmod(0o755)
+            result = subprocess.run(['bash', str(base / 'bootstrap_docker.sh'), '--profile', 'realme6'],
+                                    env=dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH']),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 9, result.stdout + result.stderr)
+            self.assertIn('monitor --profile realme6', result.stdout)
 
     def test_launcher_does_not_replace_an_active_workflow(self):
         with tempfile.TemporaryDirectory() as directory:

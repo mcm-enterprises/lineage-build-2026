@@ -43,7 +43,7 @@ Full builds may be slow or run out of memory, even with one build job.
 Before starting, open **Docker Desktop → Settings → Resources**:
 
 - Allocate about **8–10 GB RAM**, leaving memory for macOS.
-- Increase Docker's **disk image capacity** so there is at least **300 GiB free
+- Increase Docker's **disk image capacity** so there is at least **200 GiB free
   inside Docker** for a fresh source tree. Host free space and Docker capacity differ.
   Allow additional capacity if keeping both profiles.
 - Allow several GB of swap if your Desktop configuration offers it.
@@ -58,12 +58,12 @@ From the repository root, with Docker Desktop running:
 
 ```bash
 ./bootstrap_docker.sh --profile realme6 --action check-network
-BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
 This builds the Ubuntu image, checks the source filesystem and probes small remote
 refs. It does not download the full Android tree and skips the fresh-tree disk budget.
-Press Ctrl+C to leave the log viewer; that does not stop the container.
+The launcher streams logs, prints SUCCESS or FAILED, and returns the workflow exit
+code. Ctrl+C leaves the container running. Use `--detach` to start without monitoring.
 
 ### 2. Sync sources
 
@@ -71,7 +71,6 @@ After the check finishes successfully:
 
 ```bash
 ./bootstrap_docker.sh --profile realme6 --action sync
-BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
 Downloads persist in a Linux named volume. Partial downloads survive failed attempts.
@@ -96,16 +95,16 @@ Once sync has succeeded:
 
 ```bash
 JOBS=1 ./bootstrap_docker.sh --profile realme6 --action build
-BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml logs -f
 ```
 
 The `build` stage requires a completed-sync checkpoint matching the profile and
 manifest. A failed or interrupted sync must be rerun successfully before compilation.
 Existing downloads are reused. The stage then uses the downloaded tree. Check its final exit status as above.
 If it succeeds, ZIPs and checksums appear in `docker_source/realme6/zips/`.
-If the populated tree has less than the default 300 GiB remaining, set `MIN_FREE_GB`
-to an appropriate remaining-space budget; that check is conservative, not a measured
-requirement for every incremental build.
+Compilation checks for 150 GiB remaining before starting, including after `all`
+finishes syncing. This is a configurable budget, not a measured requirement for this
+device. `MIN_FREE_GB` overrides the preflight budget; `BUILD_MIN_FREE_GB` changes
+only the default compilation budget.
 
 For the Pixel reference, repeat these stages with `--profile pixel` and
 `BUILD_PROFILE=pixel`. Its artifacts are in `docker_source/pixel/zips/`.
@@ -116,7 +115,7 @@ Do not run both profiles together on the 16 GB Mac.
 | Action | What it does |
 | --- | --- |
 | `check` | Tools, Git identity, filesystem, disk budget and source-profile checks |
-| `check-network` | The same preparation plus small remote-ref probes; skips the 300 GiB budget |
+| `check-network` | The same preparation plus small remote-ref probes; skips the 200 GiB budget |
 | `sync` | Remote probes, repo initialization and source synchronization |
 | `build` | Vendor checks, compilation and artifact export from an existing tree |
 | `all` | Sync, then build |
@@ -142,12 +141,24 @@ the report may contain only its start snapshot; also check Docker's `OOMKilled` 
 BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml stop
 ```
 
-Rerun the same launcher/action to resume. Source volumes persist. Avoid
+After a reboot, start Docker Desktop and rerun the same launcher/action to resume.
+Source volumes persist. Containers do not automatically restart after a host reboot;
+failed stages are not retried forever. Avoid
 `docker compose down -v`: it deletes the downloaded source volume. The scripts
 never delete a source tree, remove Git locks or force-sync as an automatic recovery.
 
-- **Sync failure:** inspect the first failed project in the attempt log, resolve
-  its network/disk/permission error and rerun `sync`.
+- **Sync hang or failure:** the watchdog stops the command group after 10 minutes
+  without meaningful CPU/I/O activity or a 12-hour attempt deadline, then retries.
+  Initialization and remote checks also get bounded retries. Sync defaults to three
+  attempts, with one worker after the first failure. If all attempts fail, it exits
+  clearly; inspect the attempt log and rerun after resolving the cause.
+- **Low disk:** a 5 GiB runtime reserve is checked every 30 seconds. The workflow
+  stops and preserves downloads instead of retrying into a full filesystem.
+  Free space or expand storage before resuming. The reserve is a sampled guard,
+  not a guarantee against a large write filling the disk between checks.
+- **Quiet compilation:** CPU/I/O activity keeps it running; a 30-minute idle limit
+  and 48-hour deadline bound a hung compile. Compilation failures are reported
+  rather than automatically rebuilding repeatedly.
 - **Killed / exit 137:** often memory pressure, but also possible after a forced stop.
   `oom=true` confirms a container OOM kill. `oom=false` does not rule out a compiler
   process being killed inside Docker's VM. Check the surrounding log and Desktop
@@ -179,7 +190,9 @@ JOBS=1 ./build-lineage.sh --profile realme6 build
 | Logs | `logs/<profile>/<branch>/` |
 
 Overrides: `BUILD_DIR`, `OUTPUT_DIR`, `LOG_DIR`, `JOBS`, `SYNC_JOBS`, `SYNC_RETRIES`
-(default 3) and `MIN_FREE_GB` (default 300). Build jobs normally use the smaller of
+(default 3) and `MIN_FREE_GB` (automatic: 200 GiB for a fresh sync, 20 GiB to
+resume a recognized tree, 150 GiB for compilation). These are starting budgets,
+not guarantees the whole build fits. Build jobs normally use the smaller of
 CPU count or one per 4 GiB RAM, respecting cgroup v2 limits. Ccache is disabled.
 Do not share override directories between profiles. More RAM, such as 32 GiB or more,
 is recommended for compilation, not enforced as a hard prerequisite.
@@ -213,7 +226,7 @@ To run the local checks:
 
 ```bash
 python3 -m unittest discover -s tests -v
-bash -n build-lineage.sh bootstrap_docker.sh setup_build_env.sh docker_env/src/entrypoint.sh
+bash -n build-lineage.sh bootstrap_docker.sh monitor_docker.sh setup_build_env.sh docker_env/src/entrypoint.sh
 docker compose -f docker_env/docker-compose.yml config --quiet
 BUILD_PROFILE=realme6 docker compose -f docker_env/docker-compose.yml config --quiet
 ```

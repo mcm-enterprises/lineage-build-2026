@@ -20,7 +20,14 @@ LOG_DIR=${LOG_DIR:-$SCRIPT_DIR/logs/$PROFILE/$BRANCH}
 SYNC_JOBS=${SYNC_JOBS:-4}
 SYNC_RETRIES=${SYNC_RETRIES:-3}
 SYNC_RETRY_DELAY=${SYNC_RETRY_DELAY:-15}
-MIN_FREE_GB=${MIN_FREE_GB:-300}
+MIN_FREE_GB=${MIN_FREE_GB:-}
+SYNC_IDLE_SECONDS=${SYNC_IDLE_SECONDS:-600}
+SYNC_MAX_SECONDS=${SYNC_MAX_SECONDS:-43200}
+WATCHDOG_INTERVAL=${WATCHDOG_INTERVAL:-30}
+DISK_RESERVE_GB=${DISK_RESERVE_GB:-5}
+BUILD_MIN_FREE_GB=${BUILD_MIN_FREE_GB:-150}
+BUILD_IDLE_SECONDS=${BUILD_IDLE_SECONDS:-1800}
+BUILD_MAX_SECONDS=${BUILD_MAX_SECONDS:-172800}
 ACTION=${1:-all}
 fail() { echo "ERROR: $*" >&2; exit 1; }
 usage() {
@@ -34,7 +41,7 @@ case "$ACTION" in
 esac
 [[ $# -le 1 ]] || fail "Only one action is accepted."
 [[ "$BRANCH" == "$PROFILE_BRANCH" ]] || fail "$PROFILE requires $PROFILE_BRANCH; use its matching manifest."
-for value in "$SYNC_JOBS" "$SYNC_RETRIES" "$MIN_FREE_GB"; do
+for value in "$SYNC_JOBS" "$SYNC_RETRIES" "${MIN_FREE_GB:-1}" "$BUILD_MIN_FREE_GB" "$SYNC_IDLE_SECONDS" "$SYNC_MAX_SECONDS" "$WATCHDOG_INTERVAL" "$DISK_RESERVE_GB" "$BUILD_IDLE_SECONDS" "$BUILD_MAX_SECONDS"; do
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail "Job, retry and disk limits must be positive integers."
 done
 [[ "$SYNC_RETRY_DELAY" =~ ^[0-9]+$ ]] || fail "SYNC_RETRY_DELAY must be a nonnegative integer."
@@ -61,14 +68,44 @@ finish_run() {
     local code=$?
     trap - EXIT
     python3 "$SCRIPT_DIR/scripts/run_report.py" finish "$REPORT_FILE" "$code" "$STAGE" "${JOBS:-auto}" "$SYNC_JOBS" || echo "WARNING: Could not finalize run report." >&2
+    if (( code == 0 )); then
+        echo "SUCCESS: $PROFILE action=$ACTION finished (exit 0)."
+    else
+        echo "FAILED: $PROFILE action=$ACTION stage=$STAGE (exit $code). See $LOG_FILE" >&2
+    fi
     exit "$code"
 }
 python3 "$SCRIPT_DIR/scripts/run_report.py" start "$REPORT_FILE" "$PROFILE" "$ACTION" "$BUILD_DIR"
 trap finish_run EXIT
+supervised_pid=
+stop_workflow() {
+    local code=$1
+    trap '' TERM INT
+    if [[ -n "$supervised_pid" ]]; then
+        kill -TERM "$supervised_pid" 2>/dev/null || true
+        wait "$supervised_pid" 2>/dev/null || true
+    fi
+    exit "$code"
+}
+trap 'stop_workflow 143' TERM
+trap 'stop_workflow 130' INT
 cd "$BUILD_DIR"
 python3 "$SCRIPT_DIR/scripts/check_filesystem.py" "$BUILD_DIR"
-free_gb=$(df -Pk . | awk 'NR==2 {print int($4/1024/1024)}')
-[[ "$ACTION" == check-network || "$free_gb" -ge "$MIN_FREE_GB" ]] || fail "Only ${free_gb} GiB free; require ${MIN_FREE_GB}. For an existing tree, set MIN_FREE_GB to your remaining-space budget."
+check_space() {
+    local required=$1 purpose=$2 free_gb
+    free_gb=$(df -Pk . | awk 'NR==2 {print int($4/1024/1024)}')
+    echo "Storage: $free_gb GiB free; $required GiB required for $purpose."
+    (( free_gb >= required )) || fail "Only $free_gb GiB free; require $required for $purpose. Downloads are preserved. Free space or expand Docker storage, then rerun the same action. MIN_FREE_GB overrides this preflight budget."
+}
+supervise() {
+    local status
+    python3 "$SCRIPT_DIR/scripts/supervise.py" --interval "$WATCHDOG_INTERVAL" \
+        --reserve-gb "$DISK_RESERVE_GB" --path "$BUILD_DIR" --path "$LOG_DIR" --path "$OUTPUT_DIR" "$@" &
+    supervised_pid=$!
+    if wait "$supervised_pid"; then status=0; else status=$?; fi
+    supervised_pid=
+    return "$status"
+}
 mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
 # Respect a container memory limit when present.
 if [[ -r /sys/fs/cgroup/memory.max ]]; then
@@ -82,7 +119,7 @@ if (( memory_jobs < cpu_jobs )); then cpu_jobs=$memory_jobs; fi
 JOBS=${JOBS:-$cpu_jobs}
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || fail "JOBS must be a positive integer."
 if [[ "$ACTION" == build || "$ACTION" == all ]] && (( mem_kb < 32 * 1024 * 1024 )); then echo "WARNING: Less than 32 GiB RAM available. Soong may require additional RAM/swap even with JOBS=$JOBS."; fi
-echo "Profile=$PROFILE Device=$DEVICE Branch=$BRANCH Build=$BUILD_DIR Jobs=$JOBS SyncJobs=$SYNC_JOBS"
+echo "Profile=$PROFILE Action=$ACTION Device=$DEVICE Branch=$BRANCH Build=$BUILD_DIR Jobs=$JOBS SyncJobs=$SYNC_JOBS"
 echo "Log: $LOG_FILE"
 # Refuse old manifests rather than silently mixing or discarding a user's tree.
 if [[ -f .lineage-profile ]]; then
@@ -93,26 +130,41 @@ if [[ -d .repo/manifests/.git ]]; then
     existing_branch=$(git -C .repo/manifests config --get branch.default.merge)
     [[ "$existing_branch" == "refs/heads/$BRANCH" ]] || fail "Existing manifest branch is $existing_branch. Use a separate BUILD_DIR for $BRANCH."
 fi
+if [[ "$ACTION" != check-network ]]; then
+    required_space=${MIN_FREE_GB:-200}
+    purpose="fresh source sync"
+    if [[ -f .lineage-profile && -d .repo/manifests/.git ]]; then
+        required_space=${MIN_FREE_GB:-20}
+        purpose="resuming source sync"
+        echo "Existing source tree detected; downloaded repositories will be reused."
+    fi
+    if [[ "$ACTION" == build ]]; then
+        required_space=${MIN_FREE_GB:-$BUILD_MIN_FREE_GB}
+        purpose="compilation outputs"
+    fi
+    check_space "$required_space" "$purpose"
+fi
 if [[ "$ACTION" == check ]]; then echo "Preflight passed. No source downloaded or compilation started."; exit 0; fi
 if [[ "$ACTION" == check-network ]]; then
     STAGE=remote-checks
     python3 "$SCRIPT_DIR/scripts/check_remotes.py" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME" "$BRANCH"
+    echo "Network check passed. No Android sources downloaded or compilation started."
     exit 0
 fi
 sync_sources() {
     # .repo may exist after a failed init; always run the idempotent init first.
     STAGE=remote-checks
-    echo "Checking manifest and device remote refs before downloading Android sources..."
-    python3 "$SCRIPT_DIR/scripts/check_remotes.py" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME" "$BRANCH"
-    STAGE=repo-init
     python3 "$SCRIPT_DIR/scripts/sync_state.py" write .lineage-sync.json syncing "$PROFILE" "$BRANCH" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME"
+    echo "Checking manifest and device remote refs before downloading Android sources..."
+    retry_sync_step python3 "$SCRIPT_DIR/scripts/check_remotes.py" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME" "$BRANCH"
+    STAGE=repo-init
     echo "Initializing $BRANCH manifest..."
-    repo init -u https://github.com/LineageOS/android.git -b "$BRANCH" --git-lfs --no-clone-bundle
+    retry_sync_step repo init -u https://github.com/LineageOS/android.git -b "$BRANCH" --git-lfs --no-clone-bundle
     mkdir -p .repo/local_manifests
     cp "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME" ".repo/local_manifests/$MANIFEST_NAME"
     printf '%s\n' "$PROFILE" > .lineage-profile
     local attempt attempt_jobs attempt_log
-    local -a sync_status
+    local sync_status
     # Detect stalled HTTP transfers while retaining the inherited proxy/CA settings.
     export GIT_HTTP_LOW_SPEED_LIMIT=${GIT_HTTP_LOW_SPEED_LIMIT:-1}
     export GIT_HTTP_LOW_SPEED_TIME=${GIT_HTTP_LOW_SPEED_TIME:-120}
@@ -122,20 +174,45 @@ sync_sources() {
         if (( attempt > 1 )); then attempt_jobs=1; fi
         attempt_log="$LOG_DIR/${PROFILE}-sync-$(date +%Y%m%d-%H%M%S-%N)-$$-attempt-$attempt.log"
         echo "Sync attempt $attempt/$SYNC_RETRIES with $attempt_jobs workers; log: $attempt_log"
-        if repo sync -c -j"$attempt_jobs" --optimized-fetch --no-clone-bundle --no-tags --fail-fast 2>&1 | tee "$attempt_log"; then
-            repo manifest -r -o .lineage-synced-manifest.xml
+        if supervise --idle-timeout "$SYNC_IDLE_SECONDS" --max-seconds "$SYNC_MAX_SECONDS" --log "$attempt_log" -- \
+            repo sync -c -j"$attempt_jobs" --verbose --optimized-fetch --no-clone-bundle --no-tags --fail-fast; then
+            STAGE=sync-finalize
+            retry_sync_step repo manifest -r -o .lineage-synced-manifest.xml
             python3 "$SCRIPT_DIR/scripts/sync_state.py" write .lineage-sync.json complete "$PROFILE" "$BRANCH" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME"
             return 0
         else
-            sync_status=("${PIPESTATUS[@]}")
+            sync_status=$?
         fi
-        [[ ${sync_status[1]} -eq 0 ]] || fail "Cannot write $attempt_log. Check disk space and permissions."
-        echo "repo sync exit code: ${sync_status[0]}"
+        case "$sync_status" in
+            73|75) fail "Sync stopped for a log/storage error (exit $sync_status); downloads preserved. Resolve the error above before resuming." ;;
+            130|143) exit "$sync_status" ;;
+        esac
+        echo "repo sync exit code: $sync_status"
         echo "Sync attempt $attempt/$SYNC_RETRIES failed. Error lines (full context in $attempt_log):"
         grep -Ei -m 20 'error:|fatal:|failed|no space|permission denied' "$attempt_log" || true
-        if (( attempt < SYNC_RETRIES )); then sleep "$SYNC_RETRY_DELAY"; fi
+        if (( attempt < SYNC_RETRIES )); then
+            echo "Retrying in $SYNC_RETRY_DELAY seconds with one worker; downloaded repositories are preserved."
+            sleep "$SYNC_RETRY_DELAY"
+        fi
     done
     fail "Source sync failed. Fix the first reported repository/network error, then rerun sync."
+}
+retry_sync_step() {
+    local attempt status
+    for ((attempt=1; attempt<=SYNC_RETRIES; attempt++)); do
+        if supervise --idle-timeout "$SYNC_IDLE_SECONDS" --max-seconds 1800 -- "$@"; then
+            return 0
+        else
+            status=$?
+        fi
+        case "$status" in
+            73|75) fail "$STAGE stopped for a log/storage error (exit $status). Downloads preserved." ;;
+            130|143) exit "$status" ;;
+        esac
+        echo "$STAGE attempt $attempt/$SYNC_RETRIES failed (exit $status)."
+        if (( attempt < SYNC_RETRIES )); then sleep "$SYNC_RETRY_DELAY"; fi
+    done
+    fail "$STAGE failed after $SYNC_RETRIES attempts. Resolve the error above and rerun; downloads preserved."
 }
 if [[ "$ACTION" == sync || "$ACTION" == all ]]; then sync_sources; fi
 if [[ "$ACTION" == sync ]]; then echo "Sync complete."; exit 0; fi
@@ -144,13 +221,13 @@ STAGE=sync-checkpoint
 python3 "$SCRIPT_DIR/scripts/sync_state.py" check .lineage-sync.json "$PROFILE" "$BRANCH" "$SCRIPT_DIR/local_manifests/$MANIFEST_NAME"
 STAGE=vendor-checks
 python3 "$SCRIPT_DIR/scripts/check_vendor.py" "$BUILD_DIR" "$VENDOR_DIR" "$VENDOR_MAKEFILE"
+STAGE=source-compatibility
+python3 "$SCRIPT_DIR/scripts/source_fixes.py" "$BUILD_DIR" "$PROFILE"
+check_space "${MIN_FREE_GB:-$BUILD_MIN_FREE_GB}" "compilation outputs"
 # Remove inherited workaround flags; use the toolchain shipped with this branch.
 unset USE_CCACHE CCACHE_DIR CCACHE_EXEC CC_WRAPPER TEMPORARY_DISABLE_PATH_RESTRICTIONS
 unset OVERRIDE_BUILD_DATE BUILD_DATETIME_CHECK
 # Android shell helpers are not compatible with nounset.
-STAGE=build-configuration
-source build/envsetup.sh
-breakfast "$DEVICE" userdebug
 product_dir="${OUT_DIR:-out}/target/product/$DEVICE"
 shopt -s nullglob
 declare -A previous_zips=()
@@ -158,7 +235,8 @@ for zip in "$product_dir"/lineage-*-"$DEVICE".zip; do
     previous_zips["$zip"]=$(stat -c '%y:%s:%i' "$zip")
 done
 STAGE=compile
-m bacon -j"$JOBS"
+supervise --idle-timeout "$BUILD_IDLE_SECONDS" --max-seconds "$BUILD_MAX_SECONDS" -- \
+    bash -c 'set -eo pipefail; source build/envsetup.sh; breakfast "$1" userdebug; m bacon -j"$2"' -- "$DEVICE" "$JOBS"
 STAGE=artifacts
 fresh_zips=()
 for zip in "$product_dir"/lineage-*-"$DEVICE".zip; do
@@ -172,6 +250,11 @@ rsync -a "${fresh_zips[@]}" "$OUTPUT_DIR/"
 for image in boot.img dtbo.img vendor_boot.img vbmeta.img recovery.img; do
     [[ ! -f "$product_dir/$image" ]] || rsync -a "$product_dir/$image" "$OUTPUT_DIR/"
 done
-repo manifest -r -o "$OUTPUT_DIR/source-manifest.xml"
+supervise --idle-timeout "$SYNC_IDLE_SECONDS" --max-seconds 1800 -- \
+    repo manifest -r -o "$OUTPUT_DIR/source-manifest.xml"
+if [[ "$PROFILE" == realme6 ]]; then
+    cp "$BUILD_DIR/.lineage-source-fixes.json" "$OUTPUT_DIR/source-fixes.json"
+    cp "$BUILD_DIR/.lineage-source-fixes.patch" "$OUTPUT_DIR/source-fixes.patch"
+fi
 (cd "$OUTPUT_DIR" && sha256sum -- "${fresh_zips[@]##*/}" > SHA256SUMS)
 echo "Build complete. Artifacts and source-manifest.xml: $OUTPUT_DIR"
