@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+    <!-- Device Tree (Android 12 / Lineage 19 based) -->
+    <project name="crdroidandroid/android_device_motorola_ali" path="device/motorola/ali" remote="github" revision="12.1" />
+    
+    <!-- Vendor Tree -->
+    <project name="crdroidandroid/android_vendor_motorola_ali" path="vendor/motorola/ali" remote="github" revision="12.1" />
+    
+    <!-- Kernel Source -->
+    <project name="crdroidandroid/android_kernel_motorola_msm8953" path="kernel/motorola/msm8953" remote="github" revision="12.1" />
+    
+    <!-- Common Device Dependencies -->
+    <project name="LineageOS/android_device_motorola_msm8953-common" path="device/motorola/msm8953-common" remote="github" revision="lineage-18.1" /> 
+</manifest>

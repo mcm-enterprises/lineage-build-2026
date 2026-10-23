@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+    <project name="LineageOS/android_device_google_shusky" path="device/google/shusky" remote="github" />
+    <project name="LineageOS/android_device_google_husky" path="device/google/husky" remote="github" />
+</manifest>

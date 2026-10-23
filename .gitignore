@@ -1,5 +1,8 @@
-/.vscode
-android_source
-images
-logs
-
+/.vscode/
+/android_source/
+/docker_source/
+/images/
+/logs/
+/zips/
+__pycache__/
+*.pyc
