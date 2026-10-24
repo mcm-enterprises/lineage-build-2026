@@ -1,8 +1,44 @@
-/.vscode/
+# Downloaded Android source trees and generated build artifacts.
 /android_source/
+/android/
 /docker_source/
 /images/
 /logs/
 /zips/
+/out/
+/.repo/
+/.ccache/
+/ccache/
+
+# Phone images, ROM downloads and diagnostic logs copied to the project root.
+# Keep these scoped so source overlays and test fixtures remain visible.
+/*.img
+/*.zip
+/*.log
+/swapfile
+/swapfile.*
+
+# Local manifest backups; active manifests in /local_manifests/ are versioned.
+/local_manifests_delete/
+
+# Machine-specific settings and credentials. Keep example configuration visible.
+/.vscode/
+/.aws/
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Python bytecode, local environments and test caches.
 __pycache__/
-*.pyc
+*.py[cod]
+/.venv/
+/venv/
+.pytest_cache/
+/.coverage
+/htmlcov/
+
+# Desktop metadata.
+.DS_Store
+Thumbs.db

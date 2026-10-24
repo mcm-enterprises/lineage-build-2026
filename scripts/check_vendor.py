@@ -2,6 +2,7 @@
 """Catch absent vendor copy sources and Git LFS pointer files before compiling."""
 import re
 import sys
+import hashlib
 from pathlib import Path
 
 def check(root, vendor_path="vendor/google/husky", makefile_name="husky-vendor.mk"):
@@ -23,6 +24,24 @@ def check(root, vendor_path="vendor/google/husky", makefile_name="husky-vendor.m
                 if stream.read(128).startswith(b"version https://git-lfs.github.com/spec/v1"):
                     pointers.append(str(path.relative_to(root)))
     errors = []
+    # Firmware lives outside proprietary/. Missing or unresolved LFS images here
+    # otherwise surface during target-files/OTA packaging, late in the build.
+    radio_makefile = vendor / 'Android.mk'
+    if radio_makefile.is_file():
+        radio = re.findall(r'\$\(call\s+add-radio-file-sha1-checked,\s*([^,\s]+)\s*,\s*([0-9a-fA-F]{40})\s*\)',
+                           radio_makefile.read_text())
+        for relative, expected in radio:
+            image = vendor / relative
+            if not image.is_file():
+                errors.append(f'Missing OTA firmware image: {image.relative_to(root)}')
+                continue
+            with image.open('rb') as stream:
+                digest = hashlib.sha1()
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(block)
+                actual = digest.hexdigest()
+            if actual.lower() != expected.lower():
+                errors.append(f'OTA firmware checksum mismatch (or unresolved LFS blob): {image.relative_to(root)}')
     if missing:
         errors.append("Missing vendor sources (first 10): " + ", ".join(missing[:10]))
     if pointers:

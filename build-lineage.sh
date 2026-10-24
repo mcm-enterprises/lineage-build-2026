@@ -31,12 +31,12 @@ BUILD_MAX_SECONDS=${BUILD_MAX_SECONDS:-172800}
 ACTION=${1:-all}
 fail() { echo "ERROR: $*" >&2; exit 1; }
 usage() {
-    echo "Usage: $0 [--profile pixel|realme6] [check|check-network|sync|build|all]"
+    echo "Usage: $0 [--profile pixel|realme6] [check|check-network|sync|validate|build|all]"
     echo "Default profile: pixel. Set BUILD_DIR, OUTPUT_DIR, JOBS, SYNC_JOBS as needed."
 }
 case "$ACTION" in
     -h|--help) usage; exit 0 ;;
-    check|check-network|sync|build|all) ;;
+    check|check-network|sync|validate|build|all) ;;
     *) usage; exit 2 ;;
 esac
 [[ $# -le 1 ]] || fail "Only one action is accepted."
@@ -138,7 +138,7 @@ if [[ "$ACTION" != check-network ]]; then
         purpose="resuming source sync"
         echo "Existing source tree detected; downloaded repositories will be reused."
     fi
-    if [[ "$ACTION" == build ]]; then
+    if [[ "$ACTION" == build || "$ACTION" == validate ]]; then
         required_space=${MIN_FREE_GB:-$BUILD_MIN_FREE_GB}
         purpose="compilation outputs"
     fi
@@ -236,7 +236,19 @@ for zip in "$product_dir"/lineage-*-"$DEVICE".zip; do
 done
 STAGE=compile
 supervise --idle-timeout "$BUILD_IDLE_SECONDS" --max-seconds "$BUILD_MAX_SECONDS" -- \
-    bash -c 'set -eo pipefail; source build/envsetup.sh; breakfast "$1" userdebug; m bacon -j"$2"' -- "$DEVICE" "$JOBS"
+    bash -c 'set -eo pipefail
+        source build/envsetup.sh
+        breakfast "$1" userdebug
+        checks=(selinux_policy check-vintf-all)
+        if [[ "$BUILD_PROFILE" == realme6 ]]; then checks+=(recovery_sepolicy.cil); fi
+        echo "Validating SELinux and framework/vendor HAL compatibility before ROM compilation..."
+        m "${checks[@]}" -j"$2" -k0
+        if [[ "$3" != validate ]]; then m bacon -j"$2"; fi
+    ' -- "$DEVICE" "$JOBS" "$ACTION"
+if [[ "$ACTION" == validate ]]; then
+    echo "Source and integration validation passed. Full ROM compilation and packaging were not run."
+    exit 0
+fi
 STAGE=artifacts
 fresh_zips=()
 for zip in "$product_dir"/lineage-*-"$DEVICE".zip; do

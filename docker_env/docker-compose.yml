@@ -27,9 +27,7 @@ services:
       BUILD_IDLE_SECONDS: ${BUILD_IDLE_SECONDS:-1800}
       BUILD_MAX_SECONDS: ${BUILD_MAX_SECONDS:-172800}
     volumes:
-      - source:/android/lineage
+      - ../android/${BUILD_PROFILE:-pixel}:/android/lineage
       - ../docker_source/${BUILD_PROFILE:-pixel}/zips:/android/zips
       - ../docker_source/${BUILD_PROFILE:-pixel}/logs:/android/logs
     stop_grace_period: 2m
-volumes:
-  source:

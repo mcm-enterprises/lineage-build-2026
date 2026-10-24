@@ -47,6 +47,44 @@ LineageOS 21 Pixel stats libraries use. It checks the expected thermal dependenc
 layout, Pixel stats version and frozen V2 API before changing the file. The fix
 is idempotent and leaves the thermal HAL's own V1 interface unchanged.
 
+The pinned community hardware tree lacks two implementations and a compatibility
+matrix required by its device configuration. The workflow adds the legacy USB
+service, Wi-Fi HAL wrapper and MediaTek framework compatibility matrix
+from LineageOS's `lineage-21` hardware revision
+`d3b422e37e83d09301efcdfc7beca4c3c9344155`. Their source files are bundled under
+`scripts/source_overlays/realme6/` with provenance and SHA-256 hashes. The Wi-Fi
+wrapper loads the existing vendor `libwifi-hal-mtk.so`; both original USB and
+Wi-Fi package entries are required and preserved. Conflicting existing module
+sources cause a clear failure instead of being overwritten.
+
+The legacy USB executable is also labelled for the existing `mtk_hal_usb` SELinux
+domain, matching LineageOS 21 MediaTek policy revision
+`9d3404ed69414981622155625b06a58ba544f798`. This adds the missing executable label
+without changing allow rules or making SELinux permissive. The Wi-Fi policy
+already matches the upstream implementation.
+
+The compatibility script also removes the redundant `dtbo_block_device`
+and `iso9660` types from the MediaTek vendor policy. Android 14 declares the
+DTBO type and LineageOS declares the ISO filesystem type in public policy;
+retaining both declarations stops `checkpolicy` during compilation. The fix
+checks that the public declarations exist and preserves the vendor allow rules.
+It also removes the duplicate MediaTek `iso9660` filesystem label after verifying
+that LineageOS supplies the identical `genfscon` entry. This lets recovery policy
+compile while preserving the filesystem's SELinux context.
+
+The Codec2 network restriction is also aligned with the platform OMX policy:
+UDP/raw sockets stay forbidden, and TCP stays forbidden except for `su` on
+userdebug/eng builds. This resolves the conflict with the platform's debug-only
+Binder socket permission without adding allow rules or bypassing neverallow checks.
+
+The missing `mtk_hal_sf_service` declaration is restored from LineageOS policy
+revision `9d3404ed69414981622155625b06a58ba544f798`, matching its existing
+SurfaceFlinger extension service context. This adds only the service type.
+
+The duplicate `ro.audio.usb.period_us` property context is removed from the
+MediaTek system extension policy so Android's `audio_config_prop` label applies.
+The script verifies that the platform's exact integer property definition exists.
+
 The pinned source manifest describes upstream commits. Local compatibility changes
 are recorded separately in `.lineage-source-fixes.json` and
 `.lineage-source-fixes.patch` inside the source tree. Successful builds export
@@ -59,7 +97,7 @@ layout fails before compilation instead of applying a broad version replacement.
 ./build-lineage.sh --profile realme6 sync
 ./build-lineage.sh --profile realme6 build
 # Or run the complete workflow in Docker:
-./bootstrap_docker.sh --profile realme6
+./bootstrap_docker.sh --profile realme6 --action all
 ```
 
 Native outputs are under `zips/realme6/lineage-21.0/`; Docker outputs are under

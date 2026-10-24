@@ -11,10 +11,10 @@ Start with source sync, not compilation. In Docker Desktop Settings → Resource
 
 - Allocate around **8–10 GB RAM**, leaving memory for macOS. A full ROM build may
   exceed this even at one build job; a larger x86_64 Linux host is preferable for compilation.
-- Set **disk image capacity** high enough for Android sources. Host free space is
-  separate from this limit. The default preflight threshold is 200 GiB free inside Docker. This is a
-  configurable starting budget, not a measured requirement or guarantee that the
-  complete build fits. Usage depends on the source tree and build outputs.
+- Keep at least **200 GiB free on the host filesystem** containing the project for
+  a fresh source tree. The project folder must be shared with Docker Desktop and
+  stored on a case-sensitive filesystem. The threshold is a configurable starting
+  budget, not a measured requirement or guarantee that the full build fits.
 - If your Docker Desktop configuration exposes swap, allow several GB. Swap may
   help memory spikes, but does not guarantee a successful full ROM build.
 - Use Docker Desktop's supported amd64/Rosetta emulation option if available for
@@ -36,7 +36,11 @@ After the Realme sync succeeds, you can sync the reference separately:
 ./bootstrap_docker.sh --profile pixel --action sync
 ```
 
-On Linux, the default action is `all`. `--action check`, `check-network`, `sync`,
+On Linux, the launcher resumes an incremental `build` when the matching source
+sync checkpoint is complete; otherwise it runs `all`. Completed compilation
+outputs are reused, including after an error. Fix the error and rerun the launcher
+to continue. Use `--action all` explicitly to sync again before building.
+`--action check`, `check-network`, `sync`, `validate`,
 `build` or `all` overrides the default on either platform. Run one at a time unless
 you have enough resources for both. Stop an active build before changing its action.
 For example, `JOBS=1 ./bootstrap_docker.sh --profile realme6 --action build` uses
@@ -45,21 +49,34 @@ Mac; a RAM upgrade is not required to try. Compilation is **not verified on Appl
 
 ## Storage and ownership
 
-Android source trees use Docker **Linux named volumes**, avoiding macOS shared-folder
-case sensitivity and Git checkout performance issues. Logs and artifacts are host bind
-mounts for easy access. New source volumes inherit the builder's numeric UID/GID from
-the image; no root build or recursive source chown is required.
+Before ROM compilation, the build validates SELinux policy (including recovery
+on Realme 6) and framework/vendor HAL compatibility. Independent failures in these
+checks are collected in one run. Vendor checks also verify the presence and hashes
+of OTA firmware images before compilation. To run just these checks on an already
+synchronized tree, use:
 
-| Profile | Compose project | Source volume | Host files |
+```bash
+./bootstrap_docker.sh --profile realme6 --action validate
+```
+
+Validation builds the tools and metadata needed by the checks. It does not build
+the full ROM or prove that the resulting image will boot. Compilation, image sizes
+and final OTA packaging are still checked by the full build.
+
+Android source trees live in profile-specific folders under the project-local
+`android/` directory and are bind-mounted into the container. The sync preflight
+checks free space on the host filesystem containing that folder. On macOS, use a
+case-sensitive filesystem for the project folder. Logs and artifacts remain in
+per-profile host folders under `docker_source/`.
+
+| Profile | Compose project | Source folder | Host files |
 | --- | --- | --- | --- |
-| pixel | lineage-pixel | lineage-pixel_source | docker_source/pixel/{zips,logs} |
-| realme6 | lineage-realme6 | lineage-realme6_source | docker_source/realme6/{zips,logs} |
+| pixel | lineage-pixel | android/pixel/ | docker_source/pixel/{zips,logs} |
+| realme6 | lineage-realme6 | android/realme6/ | docker_source/realme6/{zips,logs} |
 
-Volumes persist after containers stop. `docker compose down` preserves them;
-`docker compose down -v` would delete the downloaded sources, so avoid it for normal recovery.
-Docker Desktop's disk image must reside on a drive with enough physical space.
-If you later change host UID/GID, existing volumes may need an explicit ownership
-correction; they are not silently chowned or replaced.
+The source folder persists after containers stop. The builder runs with your host
+UID/GID, so files remain owned by your account. On macOS, Docker Desktop must be
+allowed to access the project folder.
 
 ## Monitoring, stages and exit status
 
@@ -108,24 +125,17 @@ after syncing.
 
 ## Reusing earlier downloads
 
-Old `docker_source/lineage` and `docker_source/<profile>/lineage` bind directories
-remain untouched. The named volumes are separate. To reuse a compatible tree,
-first stop the selected container, then copy the old tree into its named volume.
-For a matching Pixel 22.1 tree at `docker_source/pixel/lineage`:
+Older trees in `docker_source/lineage` and `docker_source/<profile>/lineage` remain
+untouched. To reuse a compatible tree, copy it into the matching `android/<profile>/`
+folder while the container is stopped. Keep branches and devices separate; a 23.0
+tree cannot become a 22.1 tree by copying it.
 
 ```bash
-export BUILD_PROFILE=pixel
-export HOST_UID=$(id -u) HOST_GID=$(id -g)
-docker compose -f docker_env/docker-compose.yml stop
-docker compose -f docker_env/docker-compose.yml run --rm --user 0 \
-  --volume "$PWD/docker_source/pixel/lineage:/old-source:ro" \
-  --entrypoint bash lineage-builder -c 'cp -a /old-source/. /android/lineage/ && chown -R "$1:$2" /android/lineage' -- "$HOST_UID" "$HOST_GID"
+mkdir -p android/realme6
+cp -a docker_source/realme6/lineage/. android/realme6/
 ```
 
-Only migrate into a new/empty volume, and allow space/time for the copy. This
-explicit operation preserves the old tree, uses a read-only old mount and changes
-ownership only in the selected source volume. Do not combine branches or devices;
-a 23.0 tree cannot become a 22.1 tree by copying it. See [README](README.md).
+Only reuse a tree with the matching branch and device. See [README](README.md).
 
 ## Automatic recovery and its limits
 
@@ -152,7 +162,7 @@ and initialization have bounded retries and a 30-minute limit per attempt.
 These limits are configurable because emulated toolchains can be slow.
 
 After a host reboot, start Docker Desktop and rerun the same launcher command.
-It reuses the source volume and selects the remaining-space budget automatically.
+It reuses the source folder and selects the remaining-space budget automatically.
 The existing workflow lock file is safe to reuse once the old process is gone.
 Automatic host-reboot restart is not enabled: an exhausted retry budget or low-disk
 failure must not turn into an endless container restart loop. Stale Git lock errors
@@ -166,9 +176,9 @@ Changes to logging apply to the next launched workflow; an existing sync keeps
 its original options.
 
 A full successful sync saves `.lineage-sync.json` and a pinned source manifest inside
-the source volume. Compilation requires a completed checkpoint for the current
+the selected `android/<profile>/` source folder. Compilation requires a completed checkpoint for the current
 profile/manifest. A failed sync invalidates it; rerun sync to resume preserved
-downloads. Older source volumes need one successful sync with the updated script.
+downloads.
 
 Each logged run saves a matching JSON report in `docker_source/<profile>/logs/`.
 It includes stage, exit code, RAM/swap availability, free disk and observed cgroup

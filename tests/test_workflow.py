@@ -27,7 +27,7 @@ class WorkflowTests(unittest.TestCase):
         self.source = self.base / 'source'
         self.bin = self.base / 'bin'
         self.bin.mkdir()
-        self.env = dict(os.environ, PATH=str(self.bin) + ':' + os.environ['PATH'],
+        self.env = dict(os.environ, HOME=str(self.base), PATH=str(self.bin) + ':' + os.environ['PATH'],
                         BUILD_DIR=str(self.source), OUTPUT_DIR=str(self.base / 'zips'),
                         LOG_DIR=str(self.base / 'logs'), MIN_FREE_GB='1', SYNC_RETRY_DELAY='0',
                         JOBS='2', TRACE=str(self.base / 'trace'), BUILD_PROFILE='pixel')
@@ -68,6 +68,31 @@ sync)
   if [[ "$BUILD_PROFILE" == realme6 ]]; then
     mkdir -p hardware/mediatek/aidl/thermal hardware/google/pixel/pixelstats \
       frameworks/hardware/interfaces/stats/aidl/aidl_api/android.frameworks.stats/2
+    mkdir -p device/realme/RM6785-common
+    echo 'PRODUCT_PACKAGES += android.hardware.usb-service.mediatek-legacy libwifi-hal-wrapper' > device/realme/RM6785-common/RM6785.mk
+    mkdir -p device/realme/RM6785-common/sepolicy/vendor device/mediatek/sepolicy_vndr/basic/non_plat
+    mkdir -p device/mediatek/sepolicy_vndr/bsp/plat_private
+    echo '# Existing service types' > device/mediatek/sepolicy_vndr/bsp/plat_private/service.te
+    echo 'vendor.mediatek.framework.mtksf_ext.IMtkSF_ext/default u:object_r:mtk_hal_sf_service:s0' > device/mediatek/sepolicy_vndr/bsp/plat_private/service_contexts
+    mkdir -p system/sepolicy/private device/mediatek/sepolicy_vndr/basic/plat_private
+    echo 'ro.audio.usb.period_us u:object_r:audio_config_prop:s0 exact int' > system/sepolicy/private/property_contexts
+    echo 'ro.audio.usb.period_us u:object_r:exported_default_prop:s0 exact int' > device/mediatek/sepolicy_vndr/basic/plat_private/property_contexts
+    mkdir -p system/sepolicy/public
+    echo 'type dtbo_block_device, dev_type;' > system/sepolicy/public/device.te
+    echo 'type dtbo_block_device, dev_type;' > device/mediatek/sepolicy_vndr/basic/non_plat/device.te
+    mkdir -p device/lineage/sepolicy/common/public
+    echo 'type iso9660, sdcard_type, fs_type, mlstrustedobject;' > device/lineage/sepolicy/common/public/file.te
+    echo 'type iso9660, fs_type;' > device/mediatek/sepolicy_vndr/basic/non_plat/file.te
+    mkdir -p device/lineage/sepolicy/common/private
+    echo 'genfscon iso9660 / u:object_r:iso9660:s0' > device/lineage/sepolicy/common/private/genfs_contexts
+    echo 'genfscon iso9660 / u:object_r:iso9660:s0' > device/mediatek/sepolicy_vndr/basic/non_plat/genfs_contexts
+    echo 'neverallow mtk_hal_c2 domain:{ tcp_socket udp_socket rawip_socket } *;' > device/mediatek/sepolicy_vndr/basic/non_plat/mtk_hal_c2.te
+    cat > system/sepolicy/public/hal_omx.te <<'OMX'
+neverallow hal_omx_server domain:{ udp_socket rawip_socket } *;
+neverallow hal_omx_server { domain userdebug_or_eng(`-su') }:tcp_socket *;
+OMX
+    echo '# Existing device labels' > device/realme/RM6785-common/sepolicy/vendor/file_contexts
+    printf 'type mtk_hal_usb_exec, exec_type, file_type, vendor_file_type;\ninit_daemon_domain(mtk_hal_usb)\n' > device/mediatek/sepolicy_vndr/basic/non_plat/mtk_hal_usb.te
     cat > hardware/mediatek/aidl/thermal/Android.bp <<'THERMAL'
 cc_binary {
   name: "android.hardware.thermal-service.mediatek",
@@ -84,8 +109,11 @@ THERMAL
 breakfast() { echo "breakfast $*" >> "$TRACE"; return "${TEST_BREAKFAST_EXIT:-0}"; }
 m() {
     echo "m $*" >> "$TRACE"
+    if [[ "$1" == selinux_policy ]]; then return "${TEST_VALIDATION_EXIT:-0}"; fi
     if [[ "$BUILD_PROFILE" == realme6 ]]; then
         grep -q android.frameworks.stats-V2-ndk hardware/mediatek/aidl/thermal/Android.bp || return 10
+        test -f hardware/mediatek/aidl/usb-legacy/Android.bp || return 11
+        test -f hardware/mediatek/libwifi-hal-wrapper/Android.bp || return 12
     fi
     [[ "${TEST_BUILD_FAIL:-0}" == 0 ]] || return 9
     [[ "${TEST_NO_ZIP:-0}" == 0 ]] || return 0
@@ -147,6 +175,29 @@ for path in sys.argv[2:-1]:
         self.assertTrue((self.base / 'zips/source-fixes.patch').exists())
         self.assertTrue((self.base / 'zips/source-fixes.json').exists())
         self.assertFalse((self.base / 'zips/lineage-test-husky.zip').exists())
+
+    def test_integration_checks_precede_rom_compilation(self):
+        result = self.run_workflow(BUILD_PROFILE='realme6')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        trace = self.trace()
+        self.assertLess(trace.index('m selinux_policy check-vintf-all recovery_sepolicy.cil -j2 -k0'),
+                        trace.index('m bacon -j2'))
+
+    def test_integration_failure_stops_before_rom_compilation(self):
+        result = self.run_workflow(TEST_VALIDATION_EXIT='6')
+        self.assertEqual(result.returncode, 6, result.stdout)
+        self.assertNotIn('m bacon', self.trace())
+        self.assertFalse((self.base / 'zips/source-manifest.xml').exists())
+
+    def test_validate_checks_existing_sources_without_sync_or_rom_packaging(self):
+        self.assertEqual(self.run_workflow('sync').returncode, 0)
+        (self.base / 'trace').write_text('')
+        result = self.run_workflow('validate')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('m selinux_policy check-vintf-all -j2 -k0', self.trace())
+        self.assertNotIn('sync -c', self.trace())
+        self.assertNotIn('m bacon', self.trace())
+        self.assertFalse((self.base / 'zips/source-manifest.xml').exists())
 
     def test_profile_marker_prevents_reusing_pixel_tree_for_realme(self):
         self.assertEqual(self.run_workflow('sync').returncode, 0)
@@ -348,6 +399,29 @@ for path in sys.argv[2:-1]:
         self.assertIn('Run sync first', result.stdout)
 
 class IntegrityTests(unittest.TestCase):
+    def test_ota_firmware_is_checked_before_compilation(self):
+        import hashlib
+        checker = load_script('check_vendor')
+        with tempfile.TemporaryDirectory() as directory:
+            vendor = Path(directory) / 'vendor/realme/RM6785-common'
+            (vendor / 'proprietary').mkdir(parents=True)
+            (vendor / 'RM6785-common-vendor.mk').write_text('# vendor\n')
+            (vendor / 'Android.bp').write_text('// vendor\n')
+            content = b'firmware fixture'
+            digest = hashlib.sha1(content).hexdigest()
+            (vendor / 'Android.mk').write_text(
+                '$(call add-radio-file-sha1-checked,radio/modem.img,' + digest + ')\n')
+            with self.assertRaisesRegex(ValueError, 'Missing OTA firmware'):
+                checker.check(directory, 'vendor/realme/RM6785-common', 'RM6785-common-vendor.mk')
+            radio = vendor / 'radio/modem.img'
+            radio.parent.mkdir()
+            for invalid in (b'version https://git-lfs.github.com/spec/v1\n', b'wrong firmware'):
+                radio.write_bytes(invalid)
+                with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+                    checker.check(directory, 'vendor/realme/RM6785-common', 'RM6785-common-vendor.mk')
+            radio.write_bytes(content)
+            checker.check(directory, 'vendor/realme/RM6785-common', 'RM6785-common-vendor.mk')
+
     def test_missing_metadata_and_corrupt_zip_are_rejected(self):
         checker = load_script('check_ota')
         with tempfile.TemporaryDirectory() as directory:
@@ -420,6 +494,42 @@ class VendorTests(unittest.TestCase):
             checker.check(directory, 'vendor/realme/RM6785-common', 'RM6785-common-vendor.mk')
 
 class DockerConfigurationTests(unittest.TestCase):
+    def test_linux_launcher_resumes_only_matching_completed_sync(self):
+        sync_state = load_script('sync_state')
+        for checkpoint, explicit, expected in (
+            ('complete', None, 'build'), ('in-progress', None, 'all'),
+            ('complete', 'sync', 'sync'), ('mismatch', None, 'all'),
+        ):
+            with self.subTest(checkpoint=checkpoint, explicit=explicit), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                shutil.copy2(ROOT / 'bootstrap_docker.sh', base)
+                for folder in ('profiles', 'local_manifests', 'scripts'):
+                    shutil.copytree(ROOT / folder, base / folder)
+                tree = base / 'android/realme6'
+                (tree / 'build').mkdir(parents=True)
+                (tree / 'build/envsetup.sh').touch()
+                output = tree / 'out/previous-object.o'
+                output.parent.mkdir()
+                output.write_bytes(b'compiled output')
+                sync_state.write(tree / '.lineage-sync.json', checkpoint, 'realme6',
+                                 'lineage-21.0', base / 'local_manifests/realme6.xml')
+                bin_dir = base / 'bin'
+                bin_dir.mkdir()
+                (bin_dir / 'uname').write_text('#!/bin/sh\necho Linux\n')
+                (bin_dir / 'uname').chmod(0o755)
+                docker = bin_dir / 'docker'
+                docker.write_text('#!/bin/sh\necho "$BUILD_ACTION $*" >> "$TRACE"\n')
+                docker.chmod(0o755)
+                env = dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH'], TRACE=str(base / 'trace'))
+                env.pop('BUILD_ACTION', None)
+                args = ['bash', str(base / 'bootstrap_docker.sh'), '--profile', 'realme6', '--detach']
+                if explicit:
+                    args += ['--action', explicit]
+                result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected + ' compose ', (base / 'trace').read_text())
+                self.assertEqual(output.read_bytes(), b'compiled output')
+
     @unittest.skipUnless(shutil.which('docker'), 'Compose CLI is unavailable')
     def test_profiles_use_isolated_linux_sources_and_amd64(self):
         import json
@@ -435,10 +545,11 @@ class DockerConfigurationTests(unittest.TestCase):
             self.assertEqual(service['command'], ['sync'])
             self.assertEqual(config['name'], 'lineage-' + profile)
             source = next(v for v in service['volumes'] if v['target'] == '/android/lineage')
-            self.assertEqual(source['type'], 'volume')
-            volumes.append(config['volumes'][source['source']]['name'])
+            self.assertEqual(source['type'], 'bind')
+            self.assertEqual(source['source'], str(ROOT / 'android' / profile))
+            volumes.append(source['source'])
             for volume in service['volumes']:
-                if volume['type'] == 'bind':
+                if volume['type'] == 'bind' and volume['target'] != '/android/lineage':
                     self.assertIn('/docker_source/' + profile + '/', volume['source'])
         self.assertEqual(len(set(volumes)), 2)
 

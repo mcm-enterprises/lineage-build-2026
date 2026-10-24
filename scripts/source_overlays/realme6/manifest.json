@@ -1,0 +1,18 @@
+{
+  "upstream": "https://github.com/LineageOS/android_hardware_mediatek",
+  "branch": "lineage-21",
+  "revision": "d3b422e37e83d09301efcdfc7beca4c3c9344155",
+  "files": {
+    "hardware/mediatek/aidl/usb-legacy/Android.bp": "cadd41614e974e481cc96d19a756669159e1dbf2cd9eeb5c218f34c66525927c",
+    "hardware/mediatek/aidl/usb-legacy/Usb.cpp": "b5aff26f8372b44a93d11127758febfac0a42dba7cb96bc681d6ea4f7bc422e8",
+    "hardware/mediatek/aidl/usb-legacy/Usb.h": "ce219a2cbc0f5867d5ac8a061cc11d4e8d83c1c2412348c9c2ba1a0cf1182ab8",
+    "hardware/mediatek/aidl/usb-legacy/android.hardware.usb-service.mediatek-legacy.rc": "70ab4caf3759017ee79fe32892963bb09cafa5d749845b503b0dd16be9620694",
+    "hardware/mediatek/aidl/usb-legacy/android.hardware.usb-service.mediatek-legacy.xml": "f0ab1c6ba158f83de3e2c577b218193f4c8351a949e513c0bffe2a9100790476",
+    "hardware/mediatek/aidl/usb-legacy/service.cpp": "a9022600dd320e5b31f9ca96a777cdc74000c1df25979c52e17637935d2752fc",
+    "hardware/mediatek/libwifi-hal-wrapper/Android.bp": "55734c44e2942599065ccf4c64d58147be61810fe08148ebd58b5674885b1017",
+    "hardware/mediatek/libwifi-hal-wrapper/libwifi-hal-wrapper.xml": "ab111d9da0a87cfa0f00e6010397887aed897f1e4a9e7ecd3730e10192d02ebc",
+    "hardware/mediatek/libwifi-hal-wrapper/libwifi-hal.cpp": "7862dddc38853399ffb97297f9ba4c7e1d0d575fda6b5d5032bfdf85b9e8cba6",
+    "hardware/mediatek/libwifi-hal-wrapper/wifi_hal_legacy.h": "fb9c2dfab1030291bbda704ae3134b306b2d0fb40e003799b54952549f33c335",
+    "hardware/mediatek/vintf/mediatek_framework_compatibility_matrix.xml": "4e9dc7ce10bc53721d6161092477abd8ac6896c005fff8e8a58281277829dd3b"
+  }
+}
